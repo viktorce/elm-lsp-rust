@@ -17,7 +17,7 @@ node mcp-wrapper/cli.mjs config             # lists the harnesses
 node mcp-wrapper/cli.mjs config <harness>   # prints where your harness keeps its MCP servers and the entry to add
 ```
 
-[docs/harnesses.md](docs/harnesses.md) shows the entry for every harness. A harness that is not listed needs a stdio MCP server whose command is `node` and whose argument is the absolute path of `mcp-wrapper/index.mjs`.
+[docs/harnesses.md](docs/harnesses.md) shows the entry for every harness. In OpenAI Codex, add `omit_tools_from = ["code_mode", "deferred"]` to the server entry in `config.toml`, because Codex hides an MCP server's tools behind a search by default and three models in the benchmark never called the hidden tools. A harness that is not listed needs a stdio MCP server whose command is `node` and whose argument is the absolute path of `mcp-wrapper/index.mjs`.
 
 You can also hand the job to your agent. Tell it to read [docs/agent-install.md](docs/agent-install.md) in the clone and follow it.
 
@@ -279,7 +279,7 @@ Tests cover: definition, references, symbols, rename (functions, types, variants
 
 ## Benchmark
 
-`benchmarks/` measures what the tools are worth to an agent and tests the tools directly on real codebases. It plans ten kinds of Elm refactoring across target sizes with `--levels`, widens check commands with `entries`, runs a tool-only pass with `probe` without starting an agent, and gives Claude Code the same tasks with the language server and without it to compare solve rate, cost and time. See [benchmarks/README.md](benchmarks/README.md).
+`benchmarks/` runs ten kinds of Elm refactoring across target sizes in Claude Code, the Codex CLI and the Antigravity CLI, with the language server and without it, and tests the tools directly with `probe`. Across six models on 81 tasks in three real codebases, the server cut time by 29% to 58% for four models and cut Claude failures from 37 to 3 of 729 sessions, while `gpt-6.2-sol` showed no change in time and `gpt-6.1-terra` saved 5%. See [benchmarks/README.md](benchmarks/README.md).
 
 ## Related
 

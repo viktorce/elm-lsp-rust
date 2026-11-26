@@ -44,7 +44,7 @@ The suites need `elm` 0.19.1 and `elm-format` on `PATH`, and Node.js 20.4 or new
 - `mcp-wrapper/workspace.mjs` - Finds the Elm project of a file, checks that a path lies in it and writes the edits of a refactoring
 - `mcp-wrapper/errors.mjs` - `ToolError`, a failure that the agent is shown and can act on
 - `mcp-wrapper/harnesses.mjs` - How each harness registers the server, source of `docs/harnesses.md`
-- `benchmarks/` - Benchmark of an agent's Elm refactorings with the server and without it; `benchmarks/lib/` includes `levels.mjs`, `entries.mjs`, `probe.mjs`, `move.mjs` and `remove.mjs`
+- `benchmarks/` - Benchmark of an agent's Elm refactorings with the server and without it; `benchmarks/lib/` includes `harness.mjs`, `harnesses/`, `compare.mjs`, `stats.mjs`, `problems.mjs`, `levels.mjs`, `entries.mjs`, `probe.mjs`, `move.mjs` and `remove.mjs`
 
 ## MCP Tools
 
