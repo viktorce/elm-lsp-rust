@@ -535,8 +535,8 @@ test("elm_diagnostics says when the errors are in other files", async (t) => {
 test("only elm_diagnostics runs the compiler", async (t) => {
   const project = copyFixture(t);
   const runs = join(project, "compiler-runs.log");
-  // A compiler that records each run and finds nothing wrong
-  const recordingCompiler = `echo run >> "${runs}"`;
+  // A compiler that records each build and finds nothing wrong. Asking it for its version is no build.
+  const recordingCompiler = `if [ "$1" = make ]; then echo run >> "${runs}"; fi`;
   installLocalTool(project, "lamdera", recordingCompiler);
   installLocalTool(project, "elm", recordingCompiler);
   const client = await connect(t, { args: ["--project-tools"], cwd: project });
@@ -642,23 +642,199 @@ test("a rename lands on its symbol on a line with non-ASCII text before it", asy
   assert.match(readFileSync(at("Types.elm"), "utf-8"), /^import \u00c9t\u00e9 exposing \(first, welcome, last\)$/m);
 });
 
-// The move takes the function's text and nothing the text depends on. Until it
-// brings the imports along, this fails.
-test.todo("a moved function takes along the imports it needs", async (t) => {
+test("a moved function takes along the imports it needs", async (t) => {
   const project = copyFixture(t);
   const target = join(project, "src/Target.elm");
   writeFileSync(target, "module Target exposing (..)\n");
+  const main = join(project, "src/Main.elm");
+  writeFileSync(main, readFileSync(main, "utf-8").replace("import Browser\n", "import Browser\nimport Target\n"));
   const client = await connect(t, { cwd: project });
 
-  // greet : User -> String, and User comes from an import of Utils
-  await callTool(client, "elm_move_function", {
+  // greet : User -> String. User comes from an import of Utils, and helper is a function of Utils. Both get the
+  // whole name of their module, which the target imports.
+  const moved = await callTool(client, "elm_move_function", {
     file_path: join(project, "src/Utils.elm"),
     line: 11,
     character: 0,
     function_name: "greet",
     target_module: target,
   });
-  assert.match(readFileSync(target, "utf-8"), /^import Types exposing \(User\)$/m);
+  assert.equal(moved.isError, false, moved.text);
+  assert.match(moved.text, /^- Imported Types, Utils in target module$/m);
+  assert.equal(
+    readFileSync(target, "utf-8"),
+    ["module Target exposing (..)", "", "import Types", "import Utils", "", "", "greet : Types.User -> String", "greet user =", '    "Hello, " ++ Utils.helper user.name ++ "!"', ""].join("\n")
+  );
+  assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: main }), { text: "No errors or warnings", isError: false });
+});
+
+// A project of the fixture's packages with these modules besides, which Main.elm imports so that a build compiles them
+function moveProject(t, modules) {
+  const project = copyFixture(t);
+  const at = (name) => join(project, "src", name);
+  for (const [name, lines] of Object.entries(modules)) writeFileSync(at(name), lines.join("\n") + "\n");
+  const imports = Object.keys(modules).map((name) => `import ${name.replace(/\.elm$/, "").replaceAll("/", ".")}\n`);
+  writeFileSync(at("Main.elm"), readFileSync(at("Main.elm"), "utf-8").replace("import Browser\n", `import Browser\n${imports.join("")}`));
+  return { project, at, text: (name) => readFileSync(at(name), "utf-8") };
+}
+
+const STATUS = ["module Session exposing (Status(..), yesNo)", "", "", "type Status", "    = Active", "    | Gone"];
+const YES_NO = ["", "", "yesNo : Bool -> String", "yesNo answer =", "    if answer then", '        "yes"', "", "    else", '        "no"'];
+const MODEL = ["module Model exposing (Model)", "", "import Session", "", "", "type alias Model =", "    { status : Session.Status", "    }"];
+
+test("a moved function that its old module does not call leaves that module no import of it", async (t) => {
+  const { project, at, text } = moveProject(t, { "Session.elm": [...STATUS, ...YES_NO], "Model.elm": MODEL });
+  const client = await connect(t, { cwd: project });
+  const moved = await callTool(client, "elm_move_function", { file_path: at("Session.elm"), line: 9, function_name: "yesNo", target_module: at("Model.elm") });
+  assert.equal(moved.isError, false, moved.text);
+  // Model imports Session, and an import of Model there would close a cycle
+  assert.equal(text("Session.elm"), ["module Session exposing (Status(..))", "", "", "type Status", "    = Active", "    | Gone", ""].join("\n"));
+  assert.equal(text("Model.elm"), [...MODEL.with(0, "module Model exposing (Model, yesNo)"), ...YES_NO, ""].join("\n"));
+  assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: at("Main.elm") }), { text: "No errors or warnings", isError: false });
+});
+
+test("a move that would close an import cycle is refused, and changes no file", async (t) => {
+  // Session calls yesNo, so it would import it from Model, which imports Session
+  const shown = ["", "", "shown : Status -> String", "shown status =", "    yesNo (status == Active)"];
+  const { project, at } = moveProject(t, { "Session.elm": [...STATUS, ...shown, ...YES_NO], "Model.elm": MODEL });
+  const client = await connect(t, { cwd: project });
+  const before = sourcesOf(project);
+  const line = readFileSync(at("Session.elm"), "utf-8").split("\n").indexOf("yesNo answer =");
+  assert.deepEqual(await callTool(client, "elm_move_function", { file_path: at("Session.elm"), line, function_name: "yesNo", target_module: at("Model.elm") }), {
+    text: 'Cannot move function: moving "yesNo" is not possible: it would close an import cycle: Session would import Model, which imports Session. No file was changed',
+    isError: true,
+  });
+  assert.deepEqual(sourcesOf(project), before);
+});
+
+test("a moved function names what it uses through the imports of its new module", async (t) => {
+  // label names Html and text, which an import gives Label, a type and a function of Label, a variant of an
+  // import through an alias, and its parameter, which hides the text of Html
+  const label = [
+    "module Label exposing (Tone(..), label, plain)",
+    "",
+    "import Html exposing (Html, text)",
+    "import Html.Attributes as Attr",
+    "",
+    "",
+    "type Tone",
+    "    = Loud",
+    "    | Soft",
+    "",
+    "",
+    "label : Tone -> String -> Html msg",
+    "label tone words =",
+    "    case tone of",
+    "        Loud ->",
+    '            Html.span [ Attr.class "loud" ] [ text (String.toUpper words) ]',
+    "",
+    "        Soft ->",
+    "            (\\text -> plain text) words",
+    "",
+    "",
+    "plain : String -> Html msg",
+    "plain words =",
+    "    text words",
+  ];
+  const shout = ["", "", "shout : String -> String", "shout words =", "    String.toUpper words"];
+  const callers = ["module Shop exposing (sign)", "", "import Html exposing (Html)", "import Label", "", "", "sign : Html msg", "sign =", '    Label.label Label.Loud "on sale"'];
+  const { project, at, text } = moveProject(t, { "Label.elm": label, "Text.elm": ["module Text exposing (shout)", ...shout], "Shop.elm": callers });
+  const client = await connect(t, { cwd: project });
+  const moved = await callTool(client, "elm_move_function", { file_path: at("Label.elm"), line: 12, function_name: "label", target_module: at("Text.elm") });
+  assert.equal(moved.isError, false, moved.text);
+  assert.match(moved.text, /^- Imported Html, Html\.Attributes, Label in target module$/m);
+  assert.equal(
+    text("Text.elm"),
+    [
+      "module Text exposing (shout, label)",
+      "",
+      "import Html",
+      "import Html.Attributes",
+      "import Label",
+      ...shout,
+      "",
+      "",
+      "label : Label.Tone -> String -> Html.Html msg",
+      "label tone words =",
+      "    case tone of",
+      "        Label.Loud ->",
+      '            Html.span [ Html.Attributes.class "loud" ] [ Html.text (String.toUpper words) ]',
+      "",
+      "        Label.Soft ->",
+      "            (\\text -> Label.plain text) words",
+      "",
+    ].join("\n")
+  );
+  assert.match(text("Shop.elm"), /^import Text\n[^]*^    Text\.label Label\.Loud "on sale"$/m);
+  assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: at("Main.elm") }), { text: "No errors or warnings", isError: false });
+});
+
+test("a move whose function uses what its new module cannot reach is refused, with the place and the reason", async (t) => {
+  const tone = ["", "", "type Tone", "    = Loud", "    | Soft"];
+  const label = ["", "", "label : Tone -> String", "label tone =", "    case tone of", "        Loud ->", "            quiet", "", "        Soft ->", "            quiet"];
+  const quiet = ["", "", "quiet : String", "quiet =", '    "shh"'];
+  const { project, at } = moveProject(t, {
+    "Hidden.elm": ["module Hidden exposing (Tone(..), label)", ...tone, ...label, ...quiet],
+    "Closed.elm": ["module Closed exposing (Tone, label, quiet)", ...tone, ...label, ...quiet],
+    "Text.elm": ["module Text exposing (shout)", "", "", "shout : String -> String", "shout words =", "    String.toUpper words"],
+    "Binds.elm": ["module Binds exposing (wrap)", "", "", "wrap : String -> String", "wrap shout =", "    shout"],
+  });
+  const client = await connect(t, { cwd: project });
+  const before = sourcesOf(project);
+  const move = (from, name, line) => callTool(client, "elm_move_function", { file_path: at(from), line, function_name: name, target_module: at("Text.elm") });
+  const refused = (name, reason) => ({ text: `Cannot move function: moving "${name}" is not possible: ${reason}. No file was changed`, isError: true });
+  assert.deepEqual(await move("Hidden.elm", "label", 8), refused("label", "at src/Hidden.elm:13 the function uses quiet, which Hidden does not expose, so Text cannot reach it"));
+  assert.deepEqual(await move("Closed.elm", "label", 8), refused("label", "at src/Closed.elm:12 the function uses Loud, which Closed does not expose, so Text cannot reach it"));
+  // Elm lets no local name hide a function of its module
+  assert.deepEqual(
+    await move("Binds.elm", "wrap", 4),
+    refused("wrap", "at src/Binds.elm:5 the function binds shout, which Text declares, and the compiler does not let one hide the other")
+  );
+  assert.deepEqual(sourcesOf(project), before);
+});
+
+test("every call of a moved function names its new module", async (t) => {
+  const price = ["module Price exposing (Price, format)", "", "", "type alias Price =", "    Int", "", "", "format : Int -> String", "format cents =", '    String.fromInt cents ++ " cents"'];
+  const shout = ["", "", "shout : String -> String", "shout words =", "    String.toUpper words"];
+  const use = (body) => ["", "", "use : String", "use =", `    ${body}`];
+  const { project, at, text } = moveProject(t, {
+    "Price.elm": price,
+    "Text.elm": ["module Text exposing (shout)", ...shout],
+    // A qualified call in a module that imports Text and one that does not, one through an alias of Price and of
+    // Text, and a call without a qualifier in a module that imports Text without an exposing list
+    "Shop.elm": ["module Shop exposing (use)", "", "import Price", "import Text", ...use("Text.shout (Price.format 250)")],
+    "Till.elm": ["module Till exposing (use)", "", "import Price", ...use("Price.format 250")],
+    "Desk.elm": ["module Desk exposing (use)", "", "import Price as P", "import Text as T", ...use("T.shout (P.format 250)")],
+    "Stand.elm": ["module Stand exposing (use)", "", "import Price exposing (format)", "import Text", ...use("Text.shout (format 250)")],
+  });
+  const client = await connect(t, { cwd: project });
+  const moved = await callTool(client, "elm_move_function", { file_path: at("Price.elm"), line: 8, function_name: "format", target_module: at("Text.elm") });
+  assert.equal(moved.isError, false, moved.text);
+  assert.match(moved.text, /- Updated imports in 4 other file\(s\)\.$/);
+  assert.equal(text("Price.elm"), ["module Price exposing (Price)", "", "", "type alias Price =", "    Int", ""].join("\n"));
+  assert.equal(text("Shop.elm"), ["module Shop exposing (use)", "", "import Price", "import Text", ...use("Text.shout (Text.format 250)"), ""].join("\n"));
+  assert.equal(text("Till.elm"), ["module Till exposing (use)", "", "import Text", "import Price", ...use("Text.format 250"), ""].join("\n"));
+  assert.equal(text("Desk.elm"), ["module Desk exposing (use)", "", "import Price as P", "import Text as T", ...use("T.shout (T.format 250)"), ""].join("\n"));
+  assert.equal(text("Stand.elm"), ["module Stand exposing (use)", "", "import Price", "import Text exposing (format)", ...use("Text.shout (format 250)"), ""].join("\n"));
+  assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: at("Main.elm") }), { text: "No errors or warnings", isError: false });
+});
+
+test("the new module of a moved function calls it bare, and no longer imports it from the old one", async (t) => {
+  const price = ["module Price exposing (Price, format)", "", "", "type alias Price =", "    Int", "", "", "format : Int -> String", "format cents =", '    String.fromInt cents ++ " cents"'];
+  const shout = (body) => ["", "", "shout : String -> String", "shout words =", `    ${body}`];
+  const { project, at, text } = moveProject(t, {
+    "Price.elm": price,
+    "Text.elm": ["module Text exposing (shout)", "", "import Price exposing (format)", ...shout("String.toUpper (words ++ format 1 ++ Price.format 2)")],
+  });
+  const client = await connect(t, { cwd: project });
+  const moved = await callTool(client, "elm_move_function", { file_path: at("Price.elm"), line: 8, function_name: "format", target_module: at("Text.elm") });
+  assert.equal(moved.isError, false, moved.text);
+  // The import of Price stays, as every other import does, also one that the move leaves unused
+  assert.equal(
+    text("Text.elm"),
+    ["module Text exposing (shout, format)", "", "import Price", ...shout("String.toUpper (words ++ format 1 ++ format 2)"), "", "", ...price.slice(-3), ""].join("\n")
+  );
+  assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: at("Main.elm") }), { text: "No errors or warnings", isError: false });
 });
 
 test("the uses of a variant that starts with a letter outside ASCII are found", async (t) => {
@@ -706,7 +882,7 @@ test("the uses of a variant that starts with a letter outside ASCII are found", 
   assert.match(preview.text, /^Pattern usages \(auto-removable\): 1\nCan remove: Yes$/m);
   const removed = await callTool(client, "elm_remove_variant", { file_path: file, line: 4, character: 6, variant_name: "Été" });
   assert.equal(removed.isError, false, removed.text);
-  assert.equal(readFileSync(file, "utf-8"), [...lines.slice(0, 4), "    = Hiver", ...lines.slice(6, 12), ...lines.slice(14)].join("\n"));
+  assert.equal(readFileSync(file, "utf-8"), [...lines.slice(0, 4), "    = Hiver", ...lines.slice(6, 12), ...lines.slice(15)].join("\n"));
   assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: file }), { text: "No errors or warnings", isError: false });
 });
 
@@ -754,7 +930,7 @@ test("a function and a variant take a name that starts with a letter outside ASC
   assert.equal(readFileSync(file, "utf-8"), lines.join("\n"));
 
   // The name of another function in the file is taken, and a name that only begins like it is free
-  assert.deepEqual(await rename("function", 9, 0, "saison", "étés"), { text: "Error: Rename not possible for this function", isError: true });
+  assert.deepEqual(await rename("function", 9, 0, "saison", "étés"), { text: "Error: Cannot rename saison to étés: Saison already declares a function étés. No file was changed", isError: true });
   assert.equal((await rename("function", 9, 0, "saison", "été")).isError, false);
   assert.equal((await rename("variant", 4, 6, "Hiver", "Été")).isError, false);
   assert.equal(readFileSync(file, "utf-8"), lines.join("\n").replaceAll("saison", "été").replaceAll("Hiver", "Été"));
@@ -1100,11 +1276,11 @@ test("a file outside the source directories is followed once a tool was called o
   const utils = join(project, "src/Utils.elm");
   const rename = (from, to) =>
     callTool(client, "elm_rename_function", { file_path: utils, line: 6, character: 0, old_name: from, newName: to });
-  mkdirSync(join(project, "tests"));
-  const utilsTest = join(project, "tests/UtilsTest.elm");
+  mkdirSync(join(project, "examples"));
+  const utilsTest = join(project, "examples/UtilsTest.elm");
   const text = "module UtilsTest exposing (loud)\n\nimport Utils exposing (formatName)\n\n\nloud =\n    formatName\n";
   writeFileSync(utilsTest, text);
-  // A test is no source file. The language server learns of it here.
+  // An example is no source file. The language server learns of it here.
   await callTool(client, "elm_symbols", { file_path: utilsTest });
 
   const shifted = text.replace("import Utils", "-- added\n-- by hand\nimport Utils");
@@ -1125,10 +1301,10 @@ test("a file out of reach is not taken for a deleted one", { skip: asRoot }, asy
   const rename = (client, from, to) =>
     callTool(client, "elm_rename_function", { file_path: utils, line: 6, character: 0, old_name: from, newName: to });
   const consumer = (module) => `module ${module} exposing (loud)\n\nimport Utils exposing (formatName)\n\n\nloud =\n    formatName\n`;
-  // A test, which the index knows from a tool call on it
-  const tests = join(project, "tests");
-  const utilsTest = join(tests, "UtilsTest.elm");
-  mkdirSync(tests);
+  // An example, which the index knows from a tool call on it
+  const examples = join(project, "examples");
+  const utilsTest = join(examples, "UtilsTest.elm");
+  mkdirSync(examples);
   writeFileSync(utilsTest, consumer("UtilsTest"));
   // A module that is a link to a file kept somewhere else
   const vault = join(tempDir(t), "vault");
@@ -1140,19 +1316,19 @@ test("a file out of reach is not taken for a deleted one", { skip: asRoot }, asy
   await callTool(client, "elm_symbols", { file_path: utilsTest });
 
   try {
-    chmodSync(tests, 0o000);
+    chmodSync(examples, 0o000);
     assert.deepEqual(await rename(client, "formatName", "shout"), {
       text: `Cannot read ${utilsTest}: Permission denied (os error 13).`,
       isError: true,
     });
-    chmodSync(tests, 0o755);
+    chmodSync(examples, 0o755);
     chmodSync(vault, 0o000);
     assert.deepEqual(await rename(client, "formatName", "shout"), {
       text: `Cannot read ${linked}: Permission denied (os error 13).`,
       isError: true,
     });
   } finally {
-    chmodSync(tests, 0o755);
+    chmodSync(examples, 0o755);
     chmodSync(vault, 0o755);
   }
 
@@ -1513,12 +1689,12 @@ test("a tool called on a copy that still declares another file's module is refus
   assert.equal(misplaced.isError, true);
   assert.match(misplaced.text, /"pages" cannot be part of a module name/);
   assert.ok(existsSync(at("pages/Home.elm")));
-  mkdirSync(join(project, "tests/Support"), { recursive: true });
-  const support = join(project, "tests/Support/Fake.elm");
+  mkdirSync(join(project, "examples/Support"), { recursive: true });
+  const support = join(project, "examples/Support/Fake.elm");
   writeFileSync(support, "module Support.Fake exposing (fake)\n\n\nfake =\n    1\n");
   const supported = await callTool(client, "elm_rename_file", { file_path: support, new_name: "Stub.elm" });
   assert.equal(supported.isError, false, supported.text);
-  assert.match(readFileSync(join(project, "tests/Support/Stub.elm"), "utf-8"), /^module Support\.Stub exposing /);
+  assert.match(readFileSync(join(project, "examples/Support/Stub.elm"), "utf-8"), /^module Support\.Stub exposing /);
 });
 
 test("a file is the same file however its name is spelled in upper and lower case", async (t) => {
@@ -1773,8 +1949,8 @@ test("a copy that is there when the server starts takes no module's name either"
 test("a file outside the source directories stays in an index that is built anew", async (t) => {
   const project = copyFixture(t);
   const client = await connect(t, { cwd: project });
-  mkdirSync(join(project, "tests"));
-  const utilsTest = join(project, "tests/UtilsTest.elm");
+  mkdirSync(join(project, "examples"));
+  const utilsTest = join(project, "examples/UtilsTest.elm");
   const text = "module UtilsTest exposing (loud)\n\nimport Utils exposing (formatName)\n\n\nloud =\n    formatName\n";
   writeFileSync(utilsTest, text);
   await callTool(client, "elm_symbols", { file_path: utilsTest });
@@ -1933,7 +2109,9 @@ test("a module without an import gets its first one above its declarations, what
   const at = (name) => join(project, "src", name);
   // A template in a string, with a line that reads like an import in the first column and one that is indented
   const page = ["page : String", "page =", '    """', "import Html exposing (text)", "    import Html.Attributes", '"""'];
-  writeFileSync(at("Templates.elm"), ["module Templates exposing (page, title)", "", "", ...page, "", "", "title : String", "title =", '    "Title"', ""].join("\n"));
+  // heading calls title, so Templates imports title from where it goes
+  const heading = ["", "", "heading : String", "heading =", "    title", ""];
+  writeFileSync(at("Templates.elm"), ["module Templates exposing (page, title)", "", "", ...page, "", "", "title : String", "title =", '    "Title"', ...heading].join("\n"));
   writeFileSync(at("Told.elm"), "module Told exposing (told)\n\n\ntold : Int\ntold =\n    0\n");
   writeFileSync(at("Main.elm"), readFileSync(at("Main.elm"), "utf-8").replace("import Browser\n", "import Browser\nimport Templates\nimport Told\n"));
   const client = await connect(t, { cwd: project });
@@ -1941,7 +2119,7 @@ test("a module without an import gets its first one above its declarations, what
   const moved = await callTool(client, "elm_move_function", { file_path: at("Templates.elm"), line: 12, character: 0, function_name: "title", target_module: at("Told.elm") });
   assert.equal(moved.isError, false, moved.text);
   const left = readFileSync(at("Templates.elm"), "utf-8");
-  assert.ok(left.startsWith(["module Templates exposing (page)", "", "import Told exposing (title)", "", "", ...page, ""].join("\n")), left);
+  assert.equal(left, ["module Templates exposing (page)", "", "import Told exposing (title)", "", "", ...page, ...heading].join("\n"));
   assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: at("Main.elm") }), { text: "No errors or warnings", isError: false });
 });
 
@@ -1974,16 +2152,17 @@ test("a function moves between modules whatever their exposing lists look like",
   write("Solo.elm", ["module Solo exposing (Flag(..), only {- ) -})", ...kind("Flag"), ...word("only")]);
   write("Note.elm", ["module Note exposing (keep {- ) -}) -- (", ...word("keep")]);
   write("One.elm", ["module One exposing (single)", ...word("single")]);
-  // No import, and a doc comment that belongs to the first declaration and not to the module
-  write("Doc.elm", ["module Doc exposing (said, told)", "", "", "{-| What was said.", "-}", "said : String -> String", "said text =", "    text", ...word("told")]);
+  // No import, and a doc comment that belongs to the first declaration and not to the module. Each module from
+  // here on calls the function that moves, and imports it from where it goes.
+  write("Doc.elm", ["module Doc exposing (said, told)", "", "", "{-| What was said.", "-}", "said : String -> String", "said text =", "    told text", ...word("told")]);
   // No import either, and the doc comment of the module below two other comments, each of which holds what opens one
   const legal = ["", "-- Licensed to no one {-| in particular", "{- All rights", "{-| reserved -}", "-}", "", "{-| The small print.", "-}"];
-  write("Legal.elm", ["module Legal exposing (fine, print)", ...legal, "", "", "{-| What is fine.", "-}", "fine : String -> String", "fine text =", "    text", ...word("print")]);
+  write("Legal.elm", ["module Legal exposing (fine, print)", ...legal, "", "", "{-| What is fine.", "-}", "fine : String -> String", "fine text =", "    print text", ...word("print")]);
   // The module line opens a comment that goes on below it, and the first function is used by the second
   write("Stamp.elm", ["module Stamp exposing (ink, stamp) {- Licensed", "to no one", "-}", ...word("ink"), ...word("stamp", "ink text")]);
   // Two doc comments, the module's and the first declaration's, with two other comments between them
   const noted = ["-- A note.", "{- And another. -}", "{-| Documentation for kept. -}", "kept : String -> String"];
-  write("Noted.elm", ["module Noted exposing (kept, sent)", "", "{-| Module documentation. -}", ...noted, "kept text =", "    text", ...word("sent")]);
+  write("Noted.elm", ["module Noted exposing (kept, sent)", "", "{-| Module documentation. -}", ...noted, "kept text =", "    sent text", ...word("sent")]);
   // A list in groups, as a package lays one out beside its docs: two names to a line
   write("Grouped.elm", ["module Grouped exposing", "    ( one, two", "    , three, four", "    )", ...word("one"), ...word("two"), ...word("three"), ...word("four")]);
   // A list with comments on lines of their own, a name that is commented out and the title of a group, and with
@@ -2036,10 +2215,10 @@ test("a function moves between modules whatever their exposing lists look like",
   top("Aliased.elm", ["module Aliased exposing (loud)", "", "import Text exposing (shout)", "import Words as W", ""]);
   top("Twice.elm", ["module Twice exposing (twice)", "", "import Text exposing (shout)", "import Words exposing (Kind(..))", "import Words", ""]);
   assert.equal(text("Gen.elm"), page.join("\n") + "\n");
-  // Words imports Text by now, and takes the second function into that import
+  // Words calls whisper nowhere, so its import of Text stays as it is
   const last = await move("Words.elm", "whisper");
   assert.equal(last.isError, false, last.text);
-  top("Words.elm", [...once, "module Words exposing", "    ( Kind(..)", "    )", "", "import Text exposing (shout, whisper)", "", "{- The words."]);
+  top("Words.elm", [...once, "module Words exposing", "    ( Kind(..)", "    )", "", "import Text exposing (shout)", "", "{- The words."]);
   top("Text.elm", ["module Text exposing", "    ( Case(..) -- every case (for now), and more", "    , lower {- ) -}", "    , shout", "    , whisper", "    )"]);
 
   // A list on one line, with the parentheses of another item in front of the name and one more in a comment.
@@ -2047,7 +2226,7 @@ test("a function moves between modules whatever their exposing lists look like",
   // behind the last name
   const behind = await move("Solo.elm", "only", "Note.elm");
   assert.equal(behind.isError, false, behind.text);
-  top("Solo.elm", ["module Solo exposing (Flag(..) {- ) -})", "", "import Note exposing (only)"]);
+  top("Solo.elm", ["module Solo exposing (Flag(..) {- ) -})", "", "", "type Flag"]);
   top("Note.elm", ["module Note exposing (keep, only {- ) -}) -- ("]);
   assert.deepEqual(await callTool(client, "elm_diagnostics", { file_path: at("Main.elm") }), { text: "No errors or warnings", isError: false });
 
@@ -2058,7 +2237,7 @@ test("a function moves between modules whatever their exposing lists look like",
     lists[1],
     "- Updated imports in 0 other file(s).",
   ]);
-  top("One.elm", ["module One exposing (single)", "", "import Text exposing (single)"]);
+  assert.equal(text("One.elm"), "module One exposing (single)\n");
 
   // A name that leaves a group leaves the lines of the list as they were
   const groups = (...list) => text("Grouped.elm").split("\n").slice(1, 1 + list.length);
@@ -2086,10 +2265,10 @@ test("a function moves between modules whatever their exposing lists look like",
   top("Wide.elm", ["module Wide exposing ( wide, under )"]);
   // The last name of a list leaves the parenthesis that closes the list on its line
   assert.equal((await move("Closed.elm", "far")).isError, false);
-  top("Closed.elm", ["module Closed exposing", "    ( near", "     )", "", "import Text exposing (far)"]);
+  top("Closed.elm", ["module Closed exposing", "    ( near", "     )", "", "", "near : String -> String"]);
   // And the first name leaves the comment in front of the next one
   assert.equal((await move("Front.elm", "ahead")).isError, false);
-  top("Front.elm", ["module Front exposing ({- then -} behind)", "", "import Text exposing (ahead)"]);
+  top("Front.elm", ["module Front exposing ({- then -} behind)", "", "", "behind : String -> String"]);
 
   // Where the commas end the lines, a name takes the comma behind it along, and the comment of the name above stays
   assert.equal((await move("Ends.elm", "gamma")).isError, false);
@@ -2208,36 +2387,39 @@ test("a function moves whole, with its doc comment, and takes nothing else along
   // What follows a function is no part of it: a comment between sections, a function with a doc comment of its
   // own, one whose name starts with a letter outside ASCII. Shapes has a doc comment and no import.
   const kinds = ["", "", "type Kind", "    = Kind", ""];
-  const rest = ["", "", "-- SECTION", "", "", ...keep, "", "", "étés : Int", "étés =", "    2", "", "", ...apart, ...kinds];
+  // étés calls the three functions that move, so Shapes imports them from where they go
+  const etes = ["étés : Int", "étés =", "    keep + apart + String.length (describe 2)"];
+  const rest = ["", "", "-- SECTION", "", "", ...keep, "", "", ...etes, "", "", ...apart, ...kinds];
   writeFileSync(at("Shapes.elm"), ["module Shapes exposing (describe, keep, étés, apart)", "", "{-| Shapes.", "-}", "", "", ...describe, ...rest].join("\n"));
   writeFileSync(at("Told.elm"), "module Told exposing (told)\n\n\ntold : Int\ntold =\n    0\n");
-  writeFileSync(at("Tail.elm"), "module Tail exposing (head, tail)\n\n\nhead : Int\nhead =\n    1\n\n\ntail : Int\ntail =\n    2\n");
+  writeFileSync(at("Tail.elm"), "module Tail exposing (head, tail)\n\n\nhead : Int\nhead =\n    tail\n\n\ntail : Int\ntail =\n    2\n");
   // Neither has an import. The one doc comment of First stands right above its first function, and
-  // the one of Lone apart from it, which makes it the module's.
-  const second = ["", "", "second : Int", "second =", "    2", ""];
-  writeFileSync(at("First.elm"), ["module First exposing (first, second)", "", "", "{-| The first.", "-}", "first : Int", "first =", "    1", ...second].join("\n"));
-  writeFileSync(at("Lone.elm"), ["module Lone exposing (lone, second)", "", "{-| About Lone.", "-}", "", "", "lone : Int", "lone =", "    1", ...second].join("\n"));
+  // the one of Lone apart from it, which makes it the module's. In each module second calls the
+  // function that moves, which the module then imports from where it goes.
+  const second = (calls) => ["", "", "second : Int", "second =", `    ${calls}`, ""];
+  writeFileSync(at("First.elm"), ["module First exposing (first, second)", "", "", "{-| The first.", "-}", "first : Int", "first =", "    1", ...second("first")].join("\n"));
+  writeFileSync(at("Lone.elm"), ["module Lone exposing (lone, second)", "", "{-| About Lone.", "-}", "", "", "lone : Int", "lone =", "    1", ...second("lone")].join("\n"));
   // The one doc comment of Listed stands right above its first function as well, and lists names with @docs
   const listed = ["module Listed exposing (listed, second)", "", "{-| What the module is for.", "", "@docs listed, second", "", "-}"];
-  writeFileSync(at("Listed.elm"), [...listed, "listed : Int", "listed =", "    1", ...second].join("\n"));
+  writeFileSync(at("Listed.elm"), [...listed, "listed : Int", "listed =", "    1", ...second("listed")].join("\n"));
   // The compiler reads @docs anywhere in a comment: in the middle of a line in Spoken, on the one line of
   // Brief's, indented in Indented's. Worded's names @docstrings, a word of its own.
   const spoken = ["{-| What Spoken is for. See @docs spoken, second", "-}"];
-  writeFileSync(at("Spoken.elm"), ["module Spoken exposing (spoken, second)", "", "", ...spoken, "spoken : Int", "spoken =", "    1", ...second].join("\n"));
-  writeFileSync(at("Brief.elm"), ["module Brief exposing (brief, second)", "", "{-| @docs brief, second -}", "brief : Int", "brief =", "    1", ...second].join("\n"));
+  writeFileSync(at("Spoken.elm"), ["module Spoken exposing (spoken, second)", "", "", ...spoken, "spoken : Int", "spoken =", "    1", ...second("spoken")].join("\n"));
+  writeFileSync(at("Brief.elm"), ["module Brief exposing (brief, second)", "", "{-| @docs brief, second -}", "brief : Int", "brief =", "    1", ...second("brief")].join("\n"));
   const indented = ["{-| What Indented is for.", "", "    @docs indented, second", "", "-}"];
-  writeFileSync(at("Indented.elm"), ["module Indented exposing (indented, second)", "", ...indented, "indented : Int", "indented =", "    1", ...second].join("\n"));
+  writeFileSync(at("Indented.elm"), ["module Indented exposing (indented, second)", "", ...indented, "indented : Int", "indented =", "    1", ...second("indented")].join("\n"));
   const worded = ["{-| Its @docstrings are elsewhere.", "-}", "worded : Int", "worded =", "    1"];
-  writeFileSync(at("Worded.elm"), ["module Worded exposing (worded, second)", "", ...worded, ...second].join("\n"));
+  writeFileSync(at("Worded.elm"), ["module Worded exposing (worded, second)", "", ...worded, ...second("worded")].join("\n"));
   // The doc comment of beta stands apart from it, and alpha is the first thing in a module without imports
-  const beta = ["", "", "{-| Doc of beta.", "-}", "", "beta : Int", "beta =", "    2", ""];
+  const beta = ["", "", "{-| Doc of beta.", "-}", "", "beta : Int", "beta =", "    alpha", ""];
   writeFileSync(at("Apart.elm"), ["module Apart exposing (alpha, beta)", "", "", "alpha : Int", "alpha =", "    1", ...beta].join("\n"));
   // A comment that the last import opens, and one that the last token of a function opens. Each holds
   // a line that reads like a doc comment, above a function that has none.
   const noted = ["import Tail {- a note behind the last import", "{-| that reads like a doc comment -}", "-}"];
   const trail = ["trail : Int", "trail =", "    5 {- and one behind the last token", "{-| that reads like one too -}", "    -}"];
   const plain = ["plain : Int", "plain =", "    4"];
-  const kept = ["", "", "kept : Int", "kept =", "    6", ""];
+  const kept = ["", "", "kept : Int", "kept =", "    plain + trail", ""];
   writeFileSync(at("Trail.elm"), ["module Trail exposing (kept, plain, trail)", "", ...noted, "", "", ...trail, "", "", ...plain, ...kept].join("\n"));
   const imports = ["Apart", "Brief", "First", "Indented", "Listed", "Lone", "Shapes", "Spoken", "Tail", "Told", "Trail", "Worded"].map((name) => `import ${name}\n`).join("");
   writeFileSync(at("Main.elm"), readFileSync(at("Main.elm"), "utf-8").replace("import Browser\n", `import Browser\n${imports}`));
@@ -2263,7 +2445,7 @@ test("a function moves whole, with its doc comment, and takes nothing else along
 
   // The doc comment of a function is the last one above it, also behind a blank line and a note. With the
   // imports above keep, and with a function above apart.
-  const section = ["", "", "-- SECTION", "", "", "étés : Int", "étés =", "    2"];
+  const section = ["", "", "-- SECTION", "", "", ...etes];
   assert.equal((await move("keep", "keep =")).isError, false);
   assert.equal(text("Told.elm"), [...told, "", "", ...keep, ""].join("\n").replace("(told, describe)", "(told, describe, keep)"));
   assert.equal(text("Shapes.elm"), ["module Shapes exposing (étés, apart)", "", "{-| Shapes.", "-}", "", "import Told exposing (describe, keep)", ...section, "", "", ...apart, ...kinds].join("\n"));
@@ -2273,31 +2455,31 @@ test("a function moves whole, with its doc comment, and takes nothing else along
 
   // The last function of a file leaves the blank lines above it to no one
   assert.equal((await move("tail", "tail =", "Tail.elm")).isError, false);
-  assert.equal(text("Tail.elm"), "module Tail exposing (head)\n\nimport Told exposing (tail)\n\n\nhead : Int\nhead =\n    1\n");
+  assert.equal(text("Tail.elm"), "module Tail exposing (head)\n\nimport Told exposing (tail)\n\n\nhead : Int\nhead =\n    tail\n");
 
   // The first function of a module takes the doc comment right above it along, and leaves the module its own
   assert.equal((await move("first", "first =", "First.elm")).isError, false);
-  assert.equal(text("First.elm"), ["module First exposing (second)", "", "import Told exposing (first)", ...second].join("\n"));
+  assert.equal(text("First.elm"), ["module First exposing (second)", "", "import Told exposing (first)", ...second("first")].join("\n"));
   assert.ok(text("Told.elm").endsWith("\n\n\n{-| The first.\n-}\nfirst : Int\nfirst =\n    1\n"), text("Told.elm"));
   assert.equal((await move("lone", "lone =", "Lone.elm")).isError, false);
-  assert.equal(text("Lone.elm"), ["module Lone exposing (second)", "", "{-| About Lone.", "-}", "", "import Told exposing (lone)", ...second].join("\n"));
+  assert.equal(text("Lone.elm"), ["module Lone exposing (second)", "", "{-| About Lone.", "-}", "", "import Told exposing (lone)", ...second("lone")].join("\n"));
   assert.ok(text("Told.elm").endsWith("\n    1\n\n\nlone : Int\nlone =\n    1\n"), text("Told.elm"));
   // A doc comment with @docs is the module's, wherever the first function starts
   assert.equal((await move("listed", "listed =", "Listed.elm")).isError, false);
-  assert.equal(text("Listed.elm"), [...listed.with(0, "module Listed exposing (second)"), "", "import Told exposing (listed)", ...second].join("\n"));
+  assert.equal(text("Listed.elm"), [...listed.with(0, "module Listed exposing (second)"), "", "import Told exposing (listed)", ...second("listed")].join("\n"));
   assert.ok(text("Told.elm").endsWith("\n    1\n\n\nlisted : Int\nlisted =\n    1\n"), text("Told.elm"));
   assert.equal((await move("spoken", "spoken =", "Spoken.elm")).isError, false);
-  assert.equal(text("Spoken.elm"), ["module Spoken exposing (second)", "", "", ...spoken, "", "import Told exposing (spoken)", ...second].join("\n"));
+  assert.equal(text("Spoken.elm"), ["module Spoken exposing (second)", "", "", ...spoken, "", "import Told exposing (spoken)", ...second("spoken")].join("\n"));
   assert.ok(text("Told.elm").endsWith("\n    1\n\n\nspoken : Int\nspoken =\n    1\n"), text("Told.elm"));
   assert.equal((await move("brief", "brief =", "Brief.elm")).isError, false);
-  assert.equal(text("Brief.elm"), ["module Brief exposing (second)", "", "{-| @docs brief, second -}", "", "import Told exposing (brief)", ...second].join("\n"));
+  assert.equal(text("Brief.elm"), ["module Brief exposing (second)", "", "{-| @docs brief, second -}", "", "import Told exposing (brief)", ...second("brief")].join("\n"));
   assert.ok(text("Told.elm").endsWith("\n    1\n\n\nbrief : Int\nbrief =\n    1\n"), text("Told.elm"));
   assert.equal((await move("indented", "indented =", "Indented.elm")).isError, false);
-  assert.equal(text("Indented.elm"), ["module Indented exposing (second)", "", ...indented, "", "import Told exposing (indented)", ...second].join("\n"));
+  assert.equal(text("Indented.elm"), ["module Indented exposing (second)", "", ...indented, "", "import Told exposing (indented)", ...second("indented")].join("\n"));
   assert.ok(text("Told.elm").endsWith("\n    1\n\n\nindented : Int\nindented =\n    1\n"), text("Told.elm"));
   // One without it is the function's where it stands right above it
   assert.equal((await move("worded", "worded =", "Worded.elm")).isError, false);
-  assert.equal(text("Worded.elm"), ["module Worded exposing (second)", "", "import Told exposing (worded)", ...second].join("\n"));
+  assert.equal(text("Worded.elm"), ["module Worded exposing (second)", "", "import Told exposing (worded)", ...second("worded")].join("\n"));
   assert.ok(text("Told.elm").endsWith(`\n    1\n\n\n${worded.join("\n")}\n`), text("Told.elm"));
 
   // Without its first function, the doc comment of the next one is the first thing below the module
@@ -2383,18 +2565,19 @@ test("a function stays in its file where the parser could not read the lines aro
   assert.ok(text("Told.elm").endsWith(moved("one", 1)), text("Told.elm"));
   assert.equal((await move("Edited.elm", "three")).isError, false);
   assert.ok(text("Told.elm").endsWith(moved("three", 3)), text("Told.elm"));
-  assert.equal(text("Edited.elm"), ["module Edited exposing (..)", "", "import Told exposing (three)", ...number("one", 1), ...open, ...number("two", 2), ""].join("\n"));
+  // Edited calls three nowhere, so it gets no import of it
+  assert.equal(text("Edited.elm"), ["module Edited exposing (..)", ...number("one", 1), ...open, ...number("two", 2), ""].join("\n"));
   // A function above such lines goes as far as the parser read it, and the rest of its body stays behind
   assert.equal((await move("Cut.elm", "cut", "cut number =")).isError, false);
   assert.ok(text("Told.elm").endsWith(`\n\n${cut.slice(2).join("\n")}\n`), text("Told.elm"));
-  assert.equal(text("Cut.elm"), ["module Cut exposing (..)", "", "import Told exposing (cut)", "", "", ...rest, ...number("two", 2), ""].join("\n"));
+  assert.equal(text("Cut.elm"), ["module Cut exposing (..)", "", "", ...rest, ...number("two", 2), ""].join("\n"));
 
   // elm-format lays the case out as the parser knows it
   assert.equal((await callTool(client, "elm_format", { file_path: at("Laid.elm") })).isError, false);
   assert.equal((await move("Laid.elm", "two")).isError, false);
   assert.ok(text("Told.elm").endsWith(moved("two", 2)), text("Told.elm"));
   assert.equal((await move("Laid.elm", "rounded", "rounded number =")).isError, false);
-  assert.match(text("Laid.elm"), /^module Laid exposing \(three\)\n\nimport Told exposing \(one, two, rounded\)\n\n\n\{-\| The number three\.\n/);
+  assert.match(text("Laid.elm"), /^module Laid exposing \(three\)\n\n\n\{-\| The number three\.\n/);
 });
 
 test("a function stays in its file where its lines hold another declaration", async (t) => {
@@ -2508,12 +2691,12 @@ for (const [name, alsoAt] of [
     const body = /^formatName name =\n    String\.toUpper name$/m;
 
     // The target under its other name is the target. Written as another file, it was put back
-    // as it had been, with a new import, and the function was in no file.
-    const intoIt = await move("Main.elm", "Main.elm");
+    // as it had been, and the function was in no file.
+    const intoIt = await move("Types.elm", "Types.elm");
     assert.equal(intoIt.moved.isError, false, intoIt.moved.text);
-    assert.match(intoIt.moved.text, /Updated imports in 0 other file\(s\)/);
-    assert.match(intoIt.after["Main.elm"], body);
-    assert.equal(intoIt.after["Second.elm"], intoIt.after["Main.elm"]);
+    assert.match(intoIt.moved.text, /Updated imports in 1 other file\(s\)/);
+    assert.match(intoIt.after["Types.elm"], body);
+    assert.equal(intoIt.after["Second.elm"], intoIt.after["Types.elm"]);
     assert.doesNotMatch(intoIt.after["Utils.elm"], body);
 
     // A file that imports the function is written once
@@ -2533,8 +2716,8 @@ test("a function is moved to all of its files or to none", { skip: asRoot }, asy
   const project = copyFixture(t);
   const main = join(project, "src/Main.elm");
   // Outside the source directories, where the language server does not look and the move does
-  mkdirSync(join(project, "tests"));
-  const locked = join(project, "tests/Locked.elm");
+  mkdirSync(join(project, "examples"));
+  const locked = join(project, "examples/Locked.elm");
   writeFileSync(locked, "module Locked exposing (..)\n");
   const client = await connect(t, { cwd: project });
   const before = sourcesOf(project);
@@ -2597,9 +2780,9 @@ test("a function is not moved while a file that may import it is out of reach", 
   // The move looks at every Elm file under the project root, also outside the source directories.
   // This one is a link to a file in a directory that cannot be entered.
   const vault = join(tempDir(t), "vault");
-  const linked = join(project, "tests/Linked.elm");
+  const linked = join(project, "examples/Linked.elm");
   mkdirSync(vault);
-  mkdirSync(join(project, "tests"));
+  mkdirSync(join(project, "examples"));
   writeFileSync(join(vault, "Linked.elm"), "module Linked exposing (..)\n\nimport Utils exposing (formatName)\n");
   symlinkSync(join(vault, "Linked.elm"), linked);
   const client = await connect(t, { cwd: project });

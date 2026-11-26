@@ -3,10 +3,26 @@
  * that more than one of the tests/benchmark*.test.mjs files can use them.
  */
 
+import { execFileSync } from "child_process";
 import { join } from "path";
 import { REPO } from "./support.mjs";
 
 export const BENCH = join(REPO, "benchmarks/bench.mjs");
+
+// Stands in for the Elm compiler, and the stand-ins of the harnesses lie beside it
+export const FAKE_COMPILER = join(REPO, "tests/fakes/elm-make.mjs");
+
+// git in a test repository, with an identity and without signing, whatever this machine's configuration says
+export const git = (repo, ...args) =>
+  execFileSync("git", ["-C", repo, "-c", "user.name=test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", ...args]).toString();
+
+// Turn a directory into a git repository with one commit.
+export function gitRepository(dir) {
+  git(dir, "init", "--quiet");
+  git(dir, "add", ".");
+  git(dir, "commit", "--quiet", "--message", "fixture");
+  return dir;
+}
 
 export const SHAPES = [
   "module Shapes exposing (Shape(..), Point, area)",

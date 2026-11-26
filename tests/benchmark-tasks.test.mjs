@@ -12,7 +12,7 @@ import { test } from "node:test";
 import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { join } from "path";
 import { compiledFiles, scanOutsiders, scanProject, scanSource } from "../benchmarks/lib/elm-source.mjs";
-import { heldBack, rankedTargets, TASK_TYPES, unmetExpectations, usedOutside } from "../benchmarks/lib/tasks.mjs";
+import { heldBack, suitableTargets, TASK_TYPES, unmetExpectations, usedOutside } from "../benchmarks/lib/tasks.mjs";
 import { tempDir } from "./support.mjs";
 import { left, SHAPES } from "./benchmark-support.mjs";
 
@@ -36,7 +36,7 @@ const callers = (name, count) =>
     })
   );
 
-test("the target nearest to the ideal size is picked, and small ones are left out", () => {
+test("a target that involves fewer files than asked for is left out", () => {
   const modules = project({
     "src/Lib.elm": "module Lib exposing (..)\n\n\nfarOff : Int\nfarOff =\n    1\n\n\nnearby : Int\nnearby =\n    2\n\n\nlonely : Int\nlonely =\n    3\n",
     ...callers("farOff", 3),
@@ -44,16 +44,16 @@ test("the target nearest to the ideal size is picked, and small ones are left ou
     ...callers("lonely", 1),
   });
 
-  const ranked = rankedTargets(taskType("rename-function"), modules, allBuilt(modules), 2);
+  const suitable = suitableTargets(taskType("rename-function"), modules, allBuilt(modules), 2);
   assert.deepEqual(
-    ranked.map((target) => [target.name, target.size]),
+    suitable.map((target) => [target.name, target.size]),
     [
-      ["nearby", 8],
       ["farOff", 3],
+      ["nearby", 8],
     ]
   );
   // Every module that imports Lib may change, whether it uses the function or not
-  assert.equal(ranked[0].mayChange.length, 1 + 12);
+  assert.equal(suitable[1].mayChange.length, 1 + 12);
 
   // A function that its module keeps to itself involves no other file, whatever an importer calls its own things
   const kept = project({
@@ -81,10 +81,10 @@ test("a shared-name target needs the name in at least three other modules", () =
   };
   const shared = taskType("rename-shared-function");
   const three = project(sources);
-  assert.deepEqual(rankedTargets(shared, three, allBuilt(three), 1), []);
+  assert.deepEqual(suitableTargets(shared, three, allBuilt(three), 1), []);
 
   const four = project({ ...sources, "src/C.elm": declaring("C") });
-  const [target] = rankedTargets(shared, four, allBuilt(four), 1);
+  const [target] = suitableTargets(shared, four, allBuilt(four), 1);
   assert.equal(target.key, "src/Page.elm:view");
   assert.deepEqual(target.namesakes, ["src/A.elm", "src/B.elm", "src/C.elm"]);
   assert.match(
@@ -92,7 +92,7 @@ test("a shared-name target needs the name in at least three other modules", () =
     /in the project\. 3 other modules declare a `view` of their own\. Those are different functions and keep their name\.\n\nChange nothing else\./
   );
   // The unique-name task never takes such a function
-  assert.deepEqual(rankedTargets(taskType("rename-function"), four, allBuilt(four), 1), []);
+  assert.deepEqual(suitableTargets(taskType("rename-function"), four, allBuilt(four), 1), []);
 });
 
 test("test modules are scanned, and a target they use is left out unless they are compiled", (t) => {
@@ -111,7 +111,7 @@ test("test modules are scanned, and a target they use is left out unless they ar
   assert.deepEqual(modules.map((source) => source.file), ["src/Lib.elm", "src/Main.elm", "tests/LibTest.elm"]);
 
   // The compiler never reads the test module, so it would not notice a use of the old name left in it
-  const renames = (entries) => rankedTargets(taskType("rename-function"), modules, builtFrom(modules, entries), 1);
+  const renames = (entries) => suitableTargets(taskType("rename-function"), modules, builtFrom(modules, entries), 1);
   assert.deepEqual(renames(["src/Main.elm"]), []);
 
   // When the check command builds the test module too, the rename may edit it
@@ -160,13 +160,14 @@ test("an Elm file outside the project is found, and so is a target it can use", 
   assert.deepEqual(outsiders.map((source) => source.file), ["examples/src/Demo.elm"]);
 
   // No check compiles the example. A rename that passed it over would pass, and one that followed it there would not.
-  const targets = rankedTargets(taskType("rename-function"), modules, allBuilt(modules), 1);
+  const targets = suitableTargets(taskType("rename-function"), modules, allBuilt(modules), 1);
   assert.deepEqual(
     targets.map((target) => [target.name, usedOutside(target, outsiders)]),
     [["double", true], ["triple", false]]
   );
-  // A field can be read without an import of its record
+  // A field can be read without an import of its record, and the destination of a move gets one more name
   assert.equal(usedOutside({ module: "Elsewhere", field: "demo" }, outsiders), true);
+  assert.equal(usedOutside({ module: "Elsewhere", destination: "Lib" }, outsiders), true);
   assert.equal(usedOutside({ module: "Elsewhere", field: "label" }, outsiders), false);
 });
 
@@ -179,10 +180,10 @@ test("the check command must compile the target and every module the change can 
     "src/Orphan.elm": "module Orphan exposing (stray)\n\n\nstray : Int\nstray =\n    1\n",
     "src/OrphanUser.elm": "module OrphanUser exposing (x)\n\nimport Orphan\n\n\nx =\n    Orphan.stray\n",
   });
-  const names = (built) => rankedTargets(taskType("rename-function"), modules, built, 1).map((target) => target.name);
+  const names = (built) => suitableTargets(taskType("rename-function"), modules, built, 1).map((target) => target.name);
 
-  assert.deepEqual(names(allBuilt(modules)), ["depth", "width", "stray", "value"]);
-  assert.deepEqual(names(builtFrom(modules, ["src/Main.elm"])), ["depth", "width", "value"]);
+  assert.deepEqual(names(allBuilt(modules)), ["value", "depth", "width", "stray"]);
+  assert.deepEqual(names(builtFrom(modules, ["src/Main.elm"])), ["value", "depth", "width"]);
 
   // One module outside the build that imports Deep takes Deep's functions out
   const withOutsider = project({
@@ -190,7 +191,7 @@ test("the check command must compile the target and every module the change can 
     "src/Outsider.elm": "module Outsider exposing (y)\n\nimport Deep\n\n\ny =\n    Deep.depth\n",
   });
   assert.deepEqual(
-    rankedTargets(taskType("rename-function"), withOutsider, builtFrom(withOutsider, ["src/Main.elm"]), 1).map((target) => target.name),
+    suitableTargets(taskType("rename-function"), withOutsider, builtFrom(withOutsider, ["src/Main.elm"]), 1).map((target) => target.name),
     ["value"]
   );
   // A plan without a target names the file that holds back the most candidates, here both functions of
@@ -214,20 +215,20 @@ test("a field can be read without importing its record, so every module that nam
     // Imports none of the records and still depends on the field's name
     "src/Loose.elm": "module Loose exposing (heading)\n\n\nheading thing =\n    thing.title\n",
   });
-  const fields = (built) => rankedTargets(taskType("rename-field"), modules, built, 1).map((target) => target.key);
+  const fields = (built) => suitableTargets(taskType("rename-field"), modules, built, 1).map((target) => target.key);
 
   assert.deepEqual(fields(allBuilt(modules)), ["src/A.elm:ARecord.title"]);
   assert.deepEqual(fields(builtFrom(modules, ["src/Main.elm"])), []);
   // A name of three letters is too often the name of something else in the same files
   const short = project(Object.fromEntries(modules.map((source) => [source.file, source.text.replaceAll("title", "tag")])));
-  assert.deepEqual(rankedTargets(taskType("rename-field"), short, allBuilt(short), 1), []);
+  assert.deepEqual(suitableTargets(taskType("rename-field"), short, allBuilt(short), 1), []);
 
   // A function that takes every record with the field ties the records together: none can rename it alone
   const tied = project({
     ...Object.fromEntries(modules.map((source) => [source.file, source.text])),
     "src/Any.elm": "module Any exposing (heading)\n\n\nheading : { a | title : String } -> String\nheading thing =\n    thing.title\n",
   });
-  assert.deepEqual(rankedTargets(taskType("rename-field"), tied, allBuilt(tied), 1), []);
+  assert.deepEqual(suitableTargets(taskType("rename-field"), tied, allBuilt(tied), 1), []);
 });
 
 test("a variant's users are the modules that can name it, and its namesakes are told apart", () => {
@@ -241,7 +242,7 @@ test("a variant's users are the modules that can name it, and its namesakes are 
     // Only says the word
     "src/Talks.elm": 'module Talks exposing (x)\n\nimport Status\n\n\nx =\n    "Active" -- Active\n',
   });
-  const target = rankedTargets(taskType("rename-variant"), modules, allBuilt(modules), 1).find(
+  const target = suitableTargets(taskType("rename-variant"), modules, allBuilt(modules), 1).find(
     (candidate) => candidate.key === "src/Status.elm:Status.Active"
   );
   assert.equal(target.size, 2);
@@ -325,7 +326,7 @@ test("a target named in letters outside ASCII is found and judged by its whole n
     "src/Talks.elm": 'module Talks exposing (x)\n\nimport Café exposing (..)\n\n\nx =\n    "Fermée libellé" -- Fermée, libellé\n\n\ntype Fermées\n    = Fermées\n',
   };
   const modules = project(sources);
-  const target = (id, key) => rankedTargets(taskType(id), modules, allBuilt(modules), 1).find((candidate) => candidate.key === key);
+  const target = (id, key) => suitableTargets(taskType(id), modules, allBuilt(modules), 1).find((candidate) => candidate.key === key);
   assert.equal(target("rename-variant", "src/Café.elm:État.Fermée").size, 2);
   assert.equal(target("rename-function", "src/Café.elm:libellé").size, 1);
   assert.equal(target("rename-module", "src/Café.elm").size, 3);
@@ -354,7 +355,7 @@ test("the module that the check command builds is never renamed", () => {
     "src/Main.elm": "module Main exposing (main)\n\nimport Lib\n\n\nmain =\n    Lib.x\n",
     "src/Lib.elm": "module Lib exposing (x)\n\nimport Main\n\n\nx =\n    1\n",
   });
-  const targets = rankedTargets(taskType("rename-module"), modules, builtFrom(modules, ["src/Main.elm"]), 1);
+  const targets = suitableTargets(taskType("rename-module"), modules, builtFrom(modules, ["src/Main.elm"]), 1);
   assert.deepEqual(targets.map((target) => target.file), ["src/Lib.elm"]);
 
   // The name changes where it names the module. A package names it in elm.json as well, and there only.
@@ -380,7 +381,7 @@ test("what shares the target's name and is another kind of thing has to keep it"
     "src/Main.elm": "module Main exposing (main)\n\nimport Page\n\n\nmain =\n    ( Page.view, Page.Settings, .title )\n",
   });
   const expected = (id, key, kind) => {
-    const target = rankedTargets(taskType(id), modules, allBuilt(modules), 0).find((candidate) => candidate.key === key);
+    const target = suitableTargets(taskType(id), modules, allBuilt(modules), 0).find((candidate) => candidate.key === key);
     return taskType(id).build(target, "elm make src/Main.elm").expect.find((expectation) => expectation.kind === kind);
   };
 
@@ -704,6 +705,275 @@ test("a module rename changes elm.json where a package lists the module, and now
   // A module that the package does not expose is not added to the list by its rename
   assert.deepEqual(judge({ ...renamed, "exposed-modules": { ...renamed["exposed-modules"], Other: ["Point", "ShapeRenamed"] } }), more);
   assert.deepEqual(judge("{"), more);
+});
+
+test("a type's users are the modules that name it, and what shares its name is told apart", () => {
+  const modules = project({
+    "src/Mail.elm":
+      'module Mail exposing (Address, Email(..), parse)\n\n\ntype Email\n    = Email String\n\n\ntype alias Address =\n    { street : String\n    , town : String\n    }\n\n\ntype Inbox\n    = Inbox (List Email)\n\n\nparse : String -> Email\nparse =\n    Email\n',
+    // Through the type and its variant, with the variants along
+    "src/Bare.elm": 'module Bare exposing (x)\n\nimport Mail exposing (Email(..))\n\n\nx : Email\nx =\n    Email "x"\n',
+    "src/Qualified.elm": "module Qualified exposing (x)\n\nimport Mail as M\n\n\nx : M.Address -> String\nx address =\n    address.town\n",
+    // A module of the type's name, used in front of a dot, is no use of the type
+    "src/Email.elm": "module Email exposing (valid)\n\n\nvalid : String -> Bool\nvalid _ =\n    True\n",
+    "src/Checks.elm": "module Checks exposing (x)\n\nimport Email\nimport Mail exposing (..)\n\n\nx : Bool\nx =\n    Email.valid \"\"\n",
+    // Another type with a variant of the name, and another type of the name
+    "src/Contact.elm": "module Contact exposing (Contact(..))\n\n\ntype Contact\n    = Email String\n    | Phone String\n",
+    "src/Other.elm": "module Other exposing (Email)\n\n\ntype Email\n    = Plain\n    | Html\n",
+  });
+  const candidates = taskType("rename-type").candidates(modules);
+  const of = (key) => candidates.find((candidate) => candidate.key === key);
+  assert.equal(of("src/Mail.elm:Email").size, 1);
+  assert.equal(of("src/Mail.elm:Address").size, 1);
+  // A type that its module keeps to itself involves no other file
+  assert.equal(of("src/Mail.elm:Inbox").size, 0);
+  assert.deepEqual(of("src/Mail.elm:Email").namesakes, ["src/Other.elm"]);
+  assert.deepEqual(of("src/Mail.elm:Email").variants, [
+    { file: "src/Mail.elm", type: "Email" },
+    { file: "src/Contact.elm", type: "Contact" },
+  ]);
+
+  const { prompt, expect } = taskType("rename-type").build(of("src/Mail.elm:Email"), "elm make src/Main.elm");
+  assert.match(
+    prompt,
+    /^Rename the custom type `Email` in `src\/Mail\.elm` to `EmailRenamed`, and update every place that names it in the project\. Its variant `Email` keeps its name\. 1 other custom type has a variant called `Email`\. It keeps that name there\. 1 other module declares a type `Email` of its own\. That keeps its name\.\n\nChange nothing else\./
+  );
+  // The type's own variant is looked for on the type under its new name
+  assert.deepEqual(expect.slice(0, 4), [
+    { kind: "declares-type", file: "src/Mail.elm", name: "EmailRenamed" },
+    { kind: "lacks-type", file: "src/Mail.elm", name: "Email" },
+    { kind: "types-kept", name: "Email", files: ["src/Other.elm"] },
+    { kind: "variants-kept", variant: "Email", types: [{ file: "src/Mail.elm", type: "EmailRenamed" }, { file: "src/Contact.elm", type: "Contact" }] },
+  ]);
+  assert.match(taskType("rename-type").build(of("src/Mail.elm:Address"), "elm make src/Main.elm").prompt, /^Rename the type alias `Address` in `src\/Mail\.elm` to `AddressRenamed`, and update every place that names it in the project\.\n\n/);
+});
+
+test("a type rename changes the type's name where it names the type, and nowhere else", (t) => {
+  const elmRoot = tempDir(t);
+  mkdirSync(join(elmRoot, "src"));
+  const mail = (type, variant) =>
+    `module Mail exposing (${type}(..), parse)\n\nimport Data.Email as Email\n\n\ntype ${type}\n    = ${variant} String\n\n\nparse : String -> ${type}\nparse text =\n    ${variant} (Email.clean text)\n`;
+  const user = (module, type) =>
+    `module Send exposing (send)\n\nimport ${module}\nimport Mail exposing (${type}(..))\n\n\nsend : Mail.${type} -> ${type} -> String\nsend _ _ =\n    ${module}.valid "Email"\n`;
+  const sources = { "src/Mail.elm": mail("Email", "Email"), "src/Send.elm": user("Email", "Email") };
+  const judge = (after) => {
+    for (const [file, text] of Object.entries(after)) writeFileSync(join(elmRoot, file), text);
+    const expect = [
+      { kind: "declares-type", file: "src/Mail.elm", name: "EmailRenamed" },
+      { kind: "lacks-type", file: "src/Mail.elm", name: "Email" },
+      { kind: "variants-kept", variant: "Email", types: [{ file: "src/Mail.elm", type: "EmailRenamed" }] },
+      { kind: "renames-only", of: "type", from: "Email", to: "EmailRenamed" },
+    ];
+    const changed = Object.keys(after);
+    return unmetExpectations(elmRoot, expect, left({ changed, originals: new Map(changed.map((file) => [file, sources[file]])) }));
+  };
+  // The variant of the type's name, the module of its name and an import alias of its name keep theirs, and so does a string
+  assert.deepEqual(judge({ "src/Mail.elm": mail("EmailRenamed", "Email"), "src/Send.elm": user("Email", "EmailRenamed") }), []);
+  // A text replace renames the variant along
+  assert.deepEqual(judge({ "src/Mail.elm": mail("EmailRenamed", "EmailRenamed") }), ["Email was also renamed or removed on EmailRenamed (src/Mail.elm)"]);
+  // The module that is called like the type, as it is imported and in front of a dot
+  assert.deepEqual(judge({ "src/Mail.elm": mail("EmailRenamed", "Email"), "src/Send.elm": user("Email", "EmailRenamed").replace("Email.valid", "EmailRenamed.valid") }), [
+    "src/Send.elm changed in more than the name: Email became EmailRenamed",
+  ]);
+  assert.deepEqual(judge({ "src/Mail.elm": mail("EmailRenamed", "Email"), "src/Send.elm": user("Email", "EmailRenamed").replace("import Email\n", "import EmailRenamed\n") }), [
+    'src/Send.elm changed in more than the name: the module line and the imports no longer have "import Email"',
+  ]);
+  assert.deepEqual(judge({ "src/Mail.elm": mail("EmailRenamed", "Email").replace("as Email", "as EmailRenamed").replace("Email.clean", "EmailRenamed.clean") }), [
+    "src/Mail.elm changed in more than the name: Email became EmailRenamed",
+  ]);
+  assert.deepEqual(judge({ "src/Mail.elm": mail("EmailRenamed", "Email"), "src/Send.elm": user("Email", "EmailRenamed").replace('"Email"', '"EmailRenamed"') }), [
+    'src/Send.elm changed in more than the name: "Email" became "EmailRenamed"',
+  ]);
+  // The old name left in an annotation is for the compiler to find. Left in the declaration, the type is not renamed.
+  assert.deepEqual(judge({ "src/Mail.elm": mail("Email", "Email") }), [
+    "src/Mail.elm does not declare the type EmailRenamed",
+    "src/Mail.elm still declares the type Email",
+    "Email was also renamed or removed on EmailRenamed (src/Mail.elm)",
+  ]);
+});
+
+// A module whose function `shout` can move to Format: it uses names of its own module, of a package
+// it imports a name of, and of a module that Format imports under another qualifier. Three modules
+// call it: through an alias, bare, and by the module's whole name.
+const MOVE_SOURCES = {
+  "src/Text/Util.elm": [
+    "module Text.Util exposing (Tone(..), loud, shout, whisper)",
+    "",
+    "import Json.Encode as E",
+    "import String.Extra exposing (clean)",
+    "",
+    "",
+    "type Tone",
+    "    = Loud",
+    "    | Soft",
+    "",
+    "",
+    "{-| Make it loud -}",
+    "shout : Tone -> String -> E.Value",
+    "shout tone text =",
+    "    case tone of",
+    "        Loud ->",
+    "            E.string (clean (String.toUpper text) ++ loud)",
+    "",
+    "        Soft ->",
+    "            whisper text",
+    "",
+    "",
+    "loud : String",
+    "loud =",
+    '    "!"',
+    "",
+    "",
+    "whisper : String -> E.Value",
+    "whisper text =",
+    "    E.string text",
+    "",
+  ].join("\n"),
+  "src/Format.elm": 'module Format exposing (bold)\n\nimport Json.Encode exposing (Value)\n\n\nbold : String -> String\nbold text =\n    "*" ++ text ++ "*"\n',
+  "src/Page.elm": 'module Page exposing (page)\n\nimport Format\nimport Json.Encode\nimport Text.Util as T\n\n\npage : Json.Encode.Value\npage =\n    T.shout T.Loud (Format.bold "hi")\n',
+  "src/Bare.elm": 'module Bare exposing (bare)\n\nimport Json.Encode\nimport Text.Util exposing (Tone(..), shout)\n\n\nbare : Json.Encode.Value\nbare =\n    shout Loud "x"\n',
+  "src/Other.elm": 'module Other exposing (other)\n\nimport Json.Encode\nimport Text.Util\n\n\nother : Json.Encode.Value\nother =\n    Text.Util.shout Text.Util.Soft "y"\n',
+  "src/Main.elm": "module Main exposing (main)\n\nimport Bare\nimport Other\nimport Page\n\n\nmain =\n    [ Bare.bare, Other.other, Page.page ]\n",
+};
+
+test("a function moves to a module that can take it as it is, through the imports it has or gets", () => {
+  const modules = project(MOVE_SOURCES);
+  const [target, ...others] = taskType("move-function").candidates(modules).filter((candidate) => candidate.name === "shout");
+  assert.equal(others.length, 0);
+  // Format is the one module that calls none of it and imports no module that calls it: any other would close a circle
+  assert.deepEqual(
+    { ...target, affected: undefined, mayChange: undefined },
+    {
+      key: "src/Text/Util.elm:shout",
+      size: 3,
+      file: "src/Text/Util.elm",
+      module: "Text.Util",
+      name: "shout",
+      destination: "Format",
+      destinationFile: "src/Format.elm",
+      affected: undefined,
+      mayChange: undefined,
+      users: ["src/Page.elm", "src/Bare.elm", "src/Other.elm"],
+      bareUsers: ["src/Bare.elm"],
+      calledAtHome: false,
+      newImports: ["src/Other.elm"],
+      taken: { clean: "String.Extra", loud: "Text.Util", whisper: "Text.Util", Tone: "Text.Util", Loud: "Text.Util", Soft: "Text.Util" },
+      imports: ["String.Extra", "Text.Util"],
+      // E.string is Json.Encode.string in Format
+      requalified: true,
+    }
+  );
+  // Each module that imports Format gets one more name from it, which can clash with one of its own
+  assert.deepEqual(target.affected, ["src/Format.elm", "src/Page.elm", "src/Bare.elm", "src/Other.elm"]);
+  assert.deepEqual(target.mayChange, ["src/Text/Util.elm", "src/Format.elm", "src/Page.elm", "src/Bare.elm", "src/Other.elm"]);
+
+  const { prompt } = taskType("move-function").build(target, "elm make src/Main.elm");
+  assert.equal(
+    prompt.split("\n\n")[0],
+    "Move the function `shout`, with its type annotation, from the module `Text.Util` in `src/Text/Util.elm` to the module `Format` in `src/Format.elm`. " +
+      "`Format` exposes it from then on, and `Text.Util` no longer does. " +
+      "A call of it with a qualifier names it through the module's import of `Format` from then on, with the qualifier that this import gives. " +
+      "A call of it without a qualifier stays as it is. A module that calls it so, or that lists it in its import of `Text.Util`, imports `shout` by name from `Format` instead: add it to the exposing list of the module's import of `Format`, " +
+      "or add the line `import Format exposing (shout)` where there is none, and take it out of the exposing list of the import of `Text.Util`, together with the word `exposing` where nothing else stays in that list. " +
+      "1 module that calls it with a qualifier does not import `Format` yet. Add the line `import Format` to it. " +
+      "The function takes names from `String.Extra` and `Text.Util`, which `Format` does not import. Add the line `import String.Extra` and `import Text.Util` to `Format`, " +
+      "and write each name that the function takes from them with the whole name of its module in front. " +
+      "The function takes every other name of another module through the import of that module that `Format` has. " +
+      "A name that the function writes with a qualifier gets the qualifier of that import. A name that it writes bare stays bare where that import exposes it, and gets that qualifier where it does not. " +
+      "Leave every other import as it is, also one that the move leaves unused."
+  );
+});
+
+test("a function stays where a move of it would need a choice, close a circle or change what a name means", () => {
+  const moves = (sources) => taskType("move-function").candidates(project({ ...MOVE_SOURCES, ...sources })).filter((candidate) => candidate.name === "shout");
+  const util = MOVE_SOURCES["src/Text/Util.elm"];
+  // A name that its module keeps to itself cannot be reached from another module
+  assert.deepEqual(moves({ "src/Text/Util.elm": util.replace("loud, shout", "shout") }), []);
+  // A module that exposes the function alone would expose nothing
+  assert.deepEqual(moves({ "src/Text/Util.elm": util.replace("exposing (Tone(..), loud, shout, whisper)", "exposing (shout)") }), []);
+  // A destination that declares a name the function names bare, or that gives it from another module, would change what the name means
+  assert.deepEqual(moves({ "src/Format.elm": `${MOVE_SOURCES["src/Format.elm"]}\n\nclean : String -> String\nclean =\n    identity\n` }), []);
+  assert.deepEqual(moves({ "src/Format.elm": MOVE_SOURCES["src/Format.elm"].replace("import Json.Encode exposing (Value)\n", "import Html exposing (text)\nimport Json.Encode exposing (Value)\n") }), []);
+  // One that already has the name, as a variable for one, would clash with it
+  assert.deepEqual(moves({ "src/Format.elm": MOVE_SOURCES["src/Format.elm"].replace("bold text =\n", "bold shout =\n").replace("++ text ++", "++ shout ++") }), []);
+  // Its module may call it elsewhere, and then imports it by name from the destination, which must not import that module
+  const plain = "shout : String -> E.Value\nshout text =\n    E.string (clean (String.toUpper text))\n";
+  const calling = util
+    .replace(/^shout :[^]*?(?=\n\n\nloud)/m, plain.trimEnd())
+    .replace("whisper text =\n    E.string text", "whisper text =\n    shout text");
+  const [home] = moves({ "src/Text/Util.elm": calling });
+  assert.deepEqual([home.destination, home.calledAtHome, home.imports], ["Format", true, ["String.Extra"]]);
+  assert.deepEqual(moves({ "src/Text/Util.elm": calling, "src/Format.elm": MOVE_SOURCES["src/Format.elm"].replace("import Json.Encode", "import Text.Util\nimport Json.Encode") }), []);
+});
+
+test("a move is judged by the function's tokens in its new place, and by the imports and calls that follow it", (t) => {
+  const elmRoot = tempDir(t);
+  const write = (file, text) => {
+    mkdirSync(join(elmRoot, file, ".."), { recursive: true });
+    writeFileSync(join(elmRoot, file), text);
+  };
+  const modules = project(MOVE_SOURCES);
+  const [target] = taskType("move-function").candidates(modules).filter((candidate) => candidate.name === "shout");
+  const { expect } = taskType("move-function").build(target, "elm make src/Main.elm");
+  const [moved] = taskType("move-function").trial.edits(target, (file) => MOVE_SOURCES[file]);
+  const judge = (changes) => {
+    for (const [file, text] of Object.entries({ ...MOVE_SOURCES, ...moved, ...changes })) write(file, text);
+    const changed = Object.keys({ ...moved, ...changes });
+    return unmetExpectations(elmRoot, expect, left({ changed, originals: new Map(changed.map((file) => [file, MOVE_SOURCES[file] ?? null])), committed: new Set(Object.keys(MOVE_SOURCES)) }));
+  };
+  // The move that the plan builds
+  assert.deepEqual(judge({}), []);
+  assert.match(moved["src/Format.elm"], /^import String\.Extra$/m);
+  assert.match(moved["src/Format.elm"], /^            Json\.Encode\.string \(String\.Extra\.clean \(String\.toUpper text\) \+\+ Text\.Util\.loud\)$/m);
+  assert.match(moved["src/Bare.elm"], /^import Format exposing \(shout\)$/m);
+  assert.match(moved["src/Bare.elm"], /^import Text\.Util exposing \( Tone\(\.\.\) \)$/m);
+  assert.match(moved["src/Other.elm"], /^    Format\.shout Text\.Util\.Soft "y"$/m);
+
+  // The function at the top of the destination, laid out anew, with a name bare where an import there exposes it
+  const format = [
+    "module Format exposing (bold, shout)",
+    "",
+    "import Json.Encode exposing (Value)",
+    "import String.Extra",
+    "import Text.Util",
+    "",
+    "",
+    "shout : Text.Util.Tone -> String -> Value",
+    "shout tone text =",
+    "    case tone of",
+    "        Text.Util.Loud -> Json.Encode.string (String.Extra.clean (String.toUpper text) ++ Text.Util.loud)",
+    "        Text.Util.Soft -> Text.Util.whisper text",
+    "",
+    "",
+    "bold : String -> String",
+    "bold text =",
+    '    "*" ++ text ++ "*"',
+    "",
+  ].join("\n");
+  assert.deepEqual(judge({ "src/Format.elm": format }), []);
+  // The destination's imports stay as they were, apart from the new ones, so a name stays qualified where they do not give it bare
+  assert.deepEqual(judge({ "src/Format.elm": format.replace("import Text.Util", "import Text.Util exposing (Tone(..))").replace("Text.Util.Loud ->", "Loud ->") }), [
+    'src/Format.elm changed in more than the move: the module line and the imports no longer have "import Text.Util"',
+  ]);
+  const exposingNothingMore = format;
+  // A token of the function that changed, and a call that changed with it
+  assert.deepEqual(judge({ "src/Format.elm": exposingNothingMore.replace("String.toUpper", "String.toLower") }), [
+    "shout in src/Format.elm is not the function that was moved: toUpper became toLower",
+  ]);
+  assert.deepEqual(judge({ "src/Other.elm": moved["src/Other.elm"].replace('"y"', '"z"') }), ['src/Other.elm changed in more than the move: "y" became "z"']);
+  // An import that the move left unused, taken out, and a call made bare with an import of its own choice
+  assert.deepEqual(judge({ "src/Text/Util.elm": moved["src/Text/Util.elm"].replace("import String.Extra exposing (clean)\n", "") }), [
+    'src/Text/Util.elm changed in more than the move: the module line and the imports no longer have "import String.Extra exposing (clean)"',
+  ]);
+  assert.deepEqual(judge({ "src/Other.elm": moved["src/Other.elm"].replace("import Format\n", "import Format exposing (shout)\n").replace("Format.shout", "shout") }), [
+    'src/Other.elm changed in more than the move: Format became shout',
+  ]);
+  // A copy that stays in its module, and a move that wrote the function into a module of its own
+  assert.deepEqual(judge({ "src/Text/Util.elm": MOVE_SOURCES["src/Text/Util.elm"] }), [
+    "src/Text/Util.elm still declares shout",
+    "src/Text/Util.elm changed in more than the move: loud became shout",
+  ]);
+  assert.deepEqual(judge({ "src/Shout.elm": "module Shout exposing (shout)\n" }), ["changed files that cannot use the target: src/Shout.elm"]);
 });
 
 // A patch that adds the given lines to src/View.elm and removes the others.

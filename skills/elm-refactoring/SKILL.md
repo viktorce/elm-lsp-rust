@@ -58,7 +58,7 @@ limit: 50      # optional, default 50
 ### Diagnostics & Code Actions
 
 #### elm_diagnostics
-Compile a file and the modules it imports, and get the file's errors. When the build stops on errors in other files, the answer lists them by file, line and title. Modules that import the file are not compiled. "No errors or warnings" for the project's entry module, such as `src/Main.elm`, means the project compiles. For any other file it covers that file and what it imports.
+Compile a file and the modules it imports, and get the file's errors. When the build stops on errors in other files, the answer lists them by file, line and title. Modules that import the file are not compiled. "No errors or warnings" for the project's entry module, such as `src/Main.elm`, means the project compiles. For any other file it covers that file and what it imports. A test module under `tests/` is built with the modules in `tests/` and the `test-dependencies` of `elm.json`. On a test module of a package, it gives no verdict.
 ```
 file_path: "/path/to/File.elm"
 ```
@@ -139,7 +139,7 @@ newName: "newFieldName"
 ### Moving Code
 
 #### elm_move_function
-Move a function from one module to another. Only the function's text moves, and only an import that lists it by name, as in `import Utils exposing (greet)`, is pointed at the new module. One that listed nothing else stays as `import Utils`. Uses by qualified name, through an alias or through `exposing (..)` stay as they were. Imports that the function needs and functions of its old module that it calls are not added to the target. The target's own import of the function, if it has one, stays as it was and has to go. The old module gets an import of the target, which closes a circle when the target imports the old module. A move also reports success where a name it brings in and one in the target shadow each other, which the compiler refuses with SHADOWING: `f = 2` into a target with `x f = f 0`, or a function whose `let` binds `x` into a target with a top-level `x`. Run `elm_diagnostics` on the project's entry module afterwards and repair what it reports. In a package, the `@docs` lines of both modules stay as they were too, and only `elm make --docs=docs.json` reports them. In a module without imports, the only doc comment above the first declaration moves with that function when the function starts right below it, though the compiler reads the comment as the module's. The word `@docs` anywhere in it keeps it in the module, as in `{-| @docs a, b -}`, and so does a blank line below it, which `elm-format` writes there. `line` is any line of the function, from its type signature to the end of its body. A function in or right below lines that the parser cannot read stays where it is, and the answer names those lines: a syntax error, or a layout that `elm-format` does not write. Repair the error or run `elm_format` on the file, and repeat the call. A function also stays where its lines hold another declaration, because a type signature stands apart from its definition or a name is defined twice. Repair that first.
+Move a function from one module to another. Every call of it names the new module afterwards, including calls with a qualifier, through an alias or through `exposing (..)`. A module that calls it bare or lists it in an import, as in `import Utils exposing (greet)`, takes it by name from the new module instead, and an import that listed nothing else stays as `import Utils`. The old module imports the function only where it still calls it. In the new module the function names what it uses through that module's imports or new plain `import M` lines, which the answer lists. Other imports stay as they are, also one the move leaves unused. The move is refused, changing no file and naming the place and reason, where it would close an import cycle, also through a third module, where the function uses a name the old module does not expose or an operator no import of the new module gives, where a name of the function and one of the new module would clash, or where it updates a record the new module can name only with a qualifier. Run `elm_diagnostics` on the project's entry module afterwards. In a package, the `@docs` lines of both modules stay as they were, and only `elm make --docs=docs.json` reports them. In a module without imports, the only doc comment above the first declaration moves with that function when the function starts right below it, though the compiler reads the comment as the module's. The word `@docs` anywhere in it keeps it in the module, as in `{-| @docs a, b -}`, and so does a blank line below it, which `elm-format` writes there. `line` is any line of the function, from its type signature to the end of its body. A function in or right below lines that the parser cannot read stays where it is, and the answer names those lines: a syntax error, or a layout that `elm-format` does not write. Repair the error or run `elm_format` on the file, and repeat the call. A function also stays where its lines hold another declaration, because a type signature stands apart from its definition or a name is defined twice. Repair that first.
 ```
 file_path: "/path/to/Source.elm"
 line: 28
@@ -148,14 +148,14 @@ target_module: "/path/to/Target.elm"
 ```
 
 #### elm_rename_file
-Rename an Elm file and update module declaration + all imports. The new name is a file name without a directory, and it must be a module name: `NewName.elm`, not `newName.elm`.
+Rename an Elm file and update its module declaration, all imports and `exposed-modules` in `elm.json`, leaving strings, comments and `src/Evergreen/` alone. The new name is a file name without a directory, and it must be a module name: `NewName.elm`, not `newName.elm`.
 ```
 file_path: "/path/to/OldName.elm"
 new_name: "NewName.elm"
 ```
 
 #### elm_move_file
-Move an Elm file to a new location and update everything. The module is named after its path below the source directory, so the target has to be in a source directory of `elm.json`, and every directory below it needs an upper-case name. A relative `target_path` starts at the project root, the directory with `elm.json`.
+Move an Elm file to a new location and update its module declaration, all imports and `exposed-modules` in `elm.json`, leaving strings, comments and `src/Evergreen/` alone. The module is named after its path below the source directory, so the target has to be in a source directory of `elm.json`, and every directory below it needs an upper-case name. A relative `target_path` starts at the project root, the directory with `elm.json`.
 ```
 file_path: "/path/to/File.elm"
 target_path: "src/Utils/File.elm"
@@ -209,9 +209,11 @@ variant_name: "MyVariant"   # optional safety check
 ```
 
 Returns:
-- `canRemove`: true if no blocking usages
+- `canRemove`: true unless it is the only variant or a pattern cannot be removed
 - `blockingUsages`: constructor usages (replaced with Debug.todo)
 - `patternUsages`: pattern matches (auto-removed)
+
+Fails with an error when the project cannot be read.
 
 #### elm_remove_variant
 Remove a variant and auto-remove pattern match branches.
@@ -262,11 +264,10 @@ type_name: "BackendModel"
 - **Line/character positions are 0-indexed** in arguments. Locations in results have 1-indexed lines.
 - **Pass absolute file paths.** A relative path resolves against the directory the server was started in. The one exception is `target_path` of `elm_move_file`, which starts at the project root.
 - **One refactoring at a time per project.** The server runs the calls for a project in the order they arrive, so two renames sent together are safe. A second server on the same project is not.
-- **A test file is not in the index until a tool is called on it.** A rename then reaches it. Call `elm_symbols` on the test files that use a symbol before you rename the symbol. This works with the MCP server, which keeps its language server between calls. From the command line every call starts a new one, so a rename there never reaches a file outside the source directories: update the tests yourself.
+- **Modules under `tests/` are indexed automatically.** The server reads `tests/` with the `test-dependencies` of `elm.json` in scope, so renames, references and symbols reach test modules from both the MCP server and the command line. Only a file outside both the source directories and `tests/` waits until a tool is called on it.
 - **A copy of a module is no module until it has a name of its own.** A file that still declares the module of the file it was copied from is left alone by renames and by changes to a type, and a tool called on it is refused with both files named. Rename it with `elm_rename_file`, which rewrites its module line too. `elm_move_function` is the exception: it changes the import in every Elm file that lists the function, a copy included.
-- **A name that several modules have.** `elm_definition` and `elm_references` look a name up without the module it belongs to, so look at the path of an answer before you rely on it. `elm_rename_variant`, `elm_add_variant` and `elm_rename_field` write by the same lookup and report success: with a `NoOp` in every page module, or a `Model` with a `title` in two of them, they change the other module's code too, or stop short. Run `elm_diagnostics` on the project's entry module after one of the three.
-- **A field rename can leave uses behind.** `elm_rename_field` passes over a chained access such as `model.user.name`, a record pattern in a `case` branch, a `let` or a lambda, and a field read off a value that a pattern bound, as in `Square size -> size.width`. It reports success all the same. Run `elm_diagnostics` on the project's entry module afterwards and rename what it names.
-- **A removed field can take more along.** `elm_remove_field` removes a record alias whole when the alias stands on one line, and where the first field of a record literal on several lines goes it leaves `{` on a line by itself, which does not parse. It reports success both times. Run `elm_diagnostics` on the project's entry module afterwards and repair what it names.
+- **Cross-file `elm_definition` with shared names.** `elm_definition` looks a cross-file name up without the module it belongs to, so check the path of its answer when several modules declare the same name. `elm_references`, the rename tools, `elm_move_function`, `elm_add_variant`, `elm_remove_variant` and `elm_remove_field` resolve names by module and scope and leave namesakes alone.
+- **Field tools refuse when type inference cannot isolate the record.** `elm_rename_field`, `elm_references` on a field, `elm_prepare_remove_field` and `elm_remove_field` use whole-project type inference and refuse, changing nothing and naming the place, where another alias or a package record shares the field, where code using the field cannot be typed, such as `glsl` blocks, kernel code, missing cached packages or a module that does not compile, or for `elm_remove_field` where the alias is called as a constructor or the field is the only one using a type variable of the alias.
 - **Refactoring tools write to disk.** Read a file again before editing it further.
 - **Always verify compilation** after refactoring, with `elm_diagnostics` on the project's entry module or with the project's build command
 - **Lines with non-ASCII text before the symbol.** Columns are counted in bytes there, so a column in a result is larger than the count of characters. Pass it to a tool as the result gave it. A column you count yourself has to count UTF-8 bytes too. Edits land where they belong. `elm_diagnostics` prints the compiler's own line and column, which count from 1 and by characters.
@@ -278,6 +279,6 @@ type_name: "BackendModel"
 |-------------|----------|
 | Misses references | Finds the references in every source file of the project |
 | Breaks qualified imports | Updates `Module.func` correctly |
-| Renames a text wherever it stands | Renames a symbol of one kind, and is unsure only of a name that several modules have |
+| Renames a text wherever it stands | Renames a symbol of one kind in its own module and leaves namesakes in other modules alone |
 | Multiple file edits | Single operation |
 | Error-prone | One call, and `elm_diagnostics` to verify it |

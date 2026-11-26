@@ -342,6 +342,12 @@ export function runInTurn(tool, args) {
   return call;
 }
 
+// What elm_prepare_remove_field and elm_remove_field will not do
+const REMOVE_FIELD_LIMITS =
+  "Type inference tells which record each use of the field belongs to. Refuses and changes nothing where records of another alias, " +
+  "or of a package, share the field with this one, where the alias is called as a constructor, where the field is the only one that " +
+  "uses a type variable of the alias, and where it cannot type code that uses a field of that name. The refusal names the place";
+
 export const tools = [
   {
     name: "elm_definition",
@@ -362,7 +368,9 @@ export const tools = [
     name: "elm_references",
     title: "Find references",
     readOnly: true,
-    description: "Find all references to a symbol across the project",
+    description:
+      "Find all references to a symbol across the project. For a record field, type inference tells which record each use belongs to, " +
+      "and the uses are those that renaming the field would change. Refuses where it cannot type code that uses a field of that name. The refusal names the place",
     input: { file_path: elmFile(), ...position() },
     async run({ file_path, line, character }) {
       const { client, uri } = await openElmFile(file_path);
@@ -453,7 +461,8 @@ export const tools = [
     openWorld: true,
     description:
       "Compile an Elm file and the modules it imports, and get the file's errors. Errors in other files that stop the build are listed by file, line and title. " +
-      "Modules that import the file are not compiled, so ask for the project's entry module to check the whole project.",
+      "Modules that import the file are not compiled, so ask for the project's entry module to check the whole project. " +
+      "A test module under tests/ is built as elm-test builds it, with the modules in tests/ and the test-dependencies of elm.json.",
     input: { file_path: elmFile() },
     async run({ file_path }) {
       const { client, uri, workspaceRoot } = await connect(file_path);
@@ -565,7 +574,11 @@ export const tools = [
     name: "elm_rename_field",
     title: "Rename field",
     readOnly: false,
-    description: "Rename a record field across the entire project (type-aware). Fails if position is not on a field.",
+    description:
+      "Rename a record field across the entire project. Type inference tells which record each use of the field belongs to. " +
+      "Fails if position is not on a field. Refuses and changes nothing where records of another alias, or of a package, " +
+      "share the field with this one, as through a function that takes both, and where it cannot type code that uses a field of that name. " +
+      "The refusal names the place",
     input: {
       file_path: elmFile(),
       line: wholeNumber("Line number of the field (0-indexed)"),
@@ -600,12 +613,16 @@ export const tools = [
     title: "Move function",
     readOnly: false,
     description:
-      "Move a function from one module to another. Imports that list it by name, as in " +
-      "`import Utils exposing (greet)`, are pointed at the new module. Uses by qualified name, " +
-      "through an alias or through `exposing (..)` stay as they were, and so do the target module's " +
-      "own import of the function, the imports the function needs and the functions of its old module that it calls. " +
-      "The move also reports success where a name in the function and one in the target shadow each other, which the compiler refuses, " +
-      "as moving `f` into a module with `x f = f 0` does. Run elm_diagnostics on the project's entry module afterwards",
+      "Move a function from one module to another. Every call of it names the new module afterwards. A call with a qualifier, " +
+      "as in `Utils.greet`, takes the qualifier of the calling module's import of the new module, and a module without such an import gets " +
+      "`import Target`. A module that calls it bare or lists it in an import, as in `import Utils exposing (greet)`, takes it by name " +
+      "from the new module instead. The old module imports it only where it still calls it. In the new module the function names what " +
+      "it uses through that module's imports, and the new module imports each other module it needs under the module's whole name. " +
+      "Other imports stay as they are, also one that the move leaves unused. The move is refused, and no file changes, where it would " +
+      "close an import cycle, where the function uses a name that the new module cannot reach, such as one its old module does not " +
+      "expose or an operator that no import of the new module gives, where a name of the function and one of the new module would " +
+      "clash, and where it updates a record that the new module can name only with a qualifier. " +
+      "Run elm_diagnostics on the project's entry module afterwards",
     input: {
       file_path: elmFile("Path to the source file containing the function"),
       line: wholeNumber("A line of the function, from its type signature to the end of its body (0-indexed)"),
@@ -695,7 +712,7 @@ export const tools = [
     title: "Preview variant removal",
     readOnly: true,
     description:
-      "Check if a variant can be removed from a custom type. Returns variant info, usage count, and other variants for reference. Constructor usages will be replaced with Debug.todo.",
+      "Check if a variant can be removed from a custom type. Returns variant info, the uses that elm_remove_variant would replace with Debug.todo, the branches it would remove, and other variants for reference. Says why where it cannot make the removal.",
     input: {
       file_path: elmFile("Path to the Elm file containing the type definition"),
       ...position("variant name"),
@@ -737,6 +754,8 @@ export const tools = [
       text += `Can remove: ${result.canRemove ? "Yes" : "No"}`;
       if (!result.canRemove && result.totalVariants <= 1) {
         text += " (only variant)";
+      } else if (!result.canRemove && result.reason) {
+        text += `, since ${result.reason}`;
       }
       text += `\nLine: ${result.range.start.line + 1}:${result.range.start.character}`;
 
@@ -756,6 +775,12 @@ export const tools = [
         }
       }
 
+      const redundantUsages = result.redundantUsages || [];
+      if (redundantUsages.length > 0) {
+        text += `\n\nBranches that would match nothing without the variant, which Elm reports, and which are removed too:\n`;
+        text += redundantUsages.map((u, idx) => `  ${idx + 1}. ${u.module_name}.${u.function_name || "(top-level)"}:${u.line + 1} → "${u.context}"`).join("\n");
+      }
+
       return text;
     },
   },
@@ -765,7 +790,7 @@ export const tools = [
     title: "Remove variant",
     readOnly: false,
     description:
-      "Remove a variant from a custom type. Constructor usages are replaced with Debug.todo, pattern matches are removed.",
+      "Remove a variant from a custom type. A use as a value becomes Debug.todo, an application together with its arguments. A case branch whose pattern names the variant is removed, and so is a branch that would then match nothing, which Elm reports as redundant. Changes nothing, and says where, if a pattern outside a case names the variant or a branch shares its line with other code.",
     input: {
       file_path: elmFile("Path to the Elm file containing the type definition"),
       ...position("variant name"),
@@ -780,7 +805,7 @@ export const tools = [
       if (!result.success) {
         throw new ToolError(
           `Cannot remove variant '${result.variantName}' from type ${result.typeName}\n` +
-            `Reason: ${result.error}\n\n` +
+            `Reason: ${result.message ?? result.error}\n\n` +
             `Other variants you can use instead: [${result.otherVariants?.join(", ") || "none"}]\n\n` +
             `Blocking usages:\n${formatConstructorUsages(result.blockingUsages || [])}`
         );
@@ -799,7 +824,7 @@ export const tools = [
     name: "elm_rename_file",
     title: "Rename file",
     readOnly: false,
-    description: "Rename an Elm file and update its module declaration + all imports across the project",
+    description: "Rename an Elm file and update its module declaration + all imports across the project, and its name in the exposed-modules of a package's elm.json",
     input: {
       file_path: elmFile("Path to the Elm file to rename"),
       new_name: z.string().describe('New filename (just the name, e.g., "NewName.elm")'),
@@ -821,7 +846,7 @@ export const tools = [
     title: "Move file",
     readOnly: false,
     description:
-      "Move an Elm file to a new location and update its module declaration + all imports across the project",
+      "Move an Elm file to a new location and update its module declaration + all imports across the project, and its name in the exposed-modules of a package's elm.json",
     input: {
       file_path: elmFile("Path to the Elm file to move"),
       target_path: z
@@ -910,7 +935,8 @@ export const tools = [
     readOnly: true,
     description:
       "Check if a field can be removed from a type alias. Returns field info, usage count, and other fields for reference. " +
-      "Field accesses will be replaced with Debug.todo, record patterns will have the field removed or become _ if it's the only field.",
+      "Field accesses will be replaced with Debug.todo, record patterns will have the field removed or become _ if it's the only field. " +
+      REMOVE_FIELD_LIMITS,
     input: {
       file_path: elmFile("Path to the Elm file containing the type definition"),
       ...position("field name"),
@@ -942,6 +968,7 @@ export const tools = [
       summary += `- Record patterns ({ field }): ${result.recordPatternCount || 0} (will be removed from pattern)\n`;
       summary += `- Record literals ({ field = value }): ${result.recordLiteralCount || 0} (will be removed)\n`;
       summary += `- Record updates ({ x | field = value }): ${result.recordUpdateCount || 0} (will be removed)\n`;
+      summary += `- Variables that record patterns bind ({ field } -> field): ${result.patternVariableCount || 0} (will be replaced with Debug.todo)\n`;
       summary += `- **Total:** ${result.totalUsages || 0}\n`;
 
       summary += result.canRemove
@@ -957,7 +984,8 @@ export const tools = [
     readOnly: false,
     description:
       "Remove a field from a type alias. Field accesses are replaced with Debug.todo, record patterns have the field removed " +
-      "(or become _ if it's the only field), and record literals/updates have the field removed.",
+      "(or become _ if it's the only field), and record literals/updates have the field removed. " +
+      REMOVE_FIELD_LIMITS,
     input: {
       file_path: elmFile("Path to the Elm file containing the type definition"),
       ...position("field name"),
@@ -991,7 +1019,8 @@ export const tools = [
     title: "Preview variant addition",
     readOnly: true,
     description:
-      "Check what would happen when adding a variant to a custom type. Returns existing variants and case expressions that would need new branches.",
+      "Check what would happen when adding a variant to a custom type. Returns existing variants, the case expressions that would need new branches, " +
+      "and the places that need a branch elm_add_variant cannot write, where it would change nothing.",
     input: {
       file_path: elmFile("Path to the Elm file containing the type definition"),
       type_name: z.string().describe("Name of the custom type (e.g., 'Color')"),
@@ -1025,7 +1054,14 @@ export const tools = [
         });
       }
 
-      if (casesNeedingBranch > 0) {
+      // A case whose missing branch the tool cannot write, a case on a list for one, stops elm_add_variant
+      const unhandled = result.unhandled || [];
+      if (unhandled.length > 0) {
+        text += `\nNeeds a branch that elm_add_variant cannot write, so it changes nothing:\n`;
+        unhandled.forEach((place) => {
+          text += `  - ${place}\n`;
+        });
+      } else if (casesNeedingBranch > 0) {
         text += `\n✓ Ready to add. Use elm_add_variant to execute.`;
       } else if (caseExpressions.length > 0) {
         text += `\nAll case expressions have wildcards - no pattern changes needed.`;
@@ -1039,7 +1075,9 @@ export const tools = [
     title: "Add variant",
     readOnly: false,
     description:
-      "Add a new variant to a custom type. Adds the variant to the type definition and inserts branches in case expressions. " +
+      "Add a new variant to a custom type. Adds the variant as the last one of the type, and a branch for it to each case expression on the type that has no catch-all, " +
+      "qualified as the case's other branches. A case on a tuple or a Maybe gets a branch with the new variant in its place and wildcards elsewhere, as in ( Purple, _ ). " +
+      "Where a case needs a branch that this tool cannot write, as a case on a list, nothing is changed and the places are named. " +
       "Use branches to provide code and imports for each case expression (indexed by prepare_add_variant output). " +
       "If branches is provided, it must have exactly the same count as casesNeedingBranch from prepare_add_variant. " +
       "Branch format: 'AddDebug' for Debug.todo, {AddCode: 'expr'} for code, {AddCodeWithImports: {imports: [...], code: 'expr'}} for code + imports.",

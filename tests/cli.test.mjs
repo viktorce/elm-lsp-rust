@@ -28,7 +28,7 @@ test("tools lists every tool, and --json describes their arguments", async () =>
   const listing = await cli(["tools"]);
   assert.equal(listing.code, 0);
   assert.equal(listing.stdout.trim().split("\n").length, 22);
-  assert.match(listing.stdout, /^elm_references\s+Find all references to a symbol across the project$/m);
+  assert.match(listing.stdout, /^elm_references\s+Find all references to a symbol across the project\. For a record field/m);
 
   const described = JSON.parse((await cli(["tools", "--json"])).stdout);
   assert.equal(described.length, 22);
@@ -65,11 +65,13 @@ test("a tool runs with flags, prints its result and exits", async (t) => {
     code: 0,
     stdout:
       [
-        "Found 5 references:",
+        // The declaration is one of them
+        "Found 6 references:",
         `${project}/src/Main.elm:6:23`,
         `${project}/src/Main.elm:51:36`,
         `${project}/src/Utils.elm:1:23`,
         `${project}/src/Utils.elm:6:0`,
+        `${project}/src/Utils.elm:7:0`,
         `${project}/src/Utils.elm:18:4`,
       ].join("\n") + "\n",
     stderr: "",

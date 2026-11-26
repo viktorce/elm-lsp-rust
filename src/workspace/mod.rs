@@ -16,10 +16,14 @@ mod erd;
 mod field_operations;
 mod file_operations;
 mod move_function;
+mod resolve;
+#[cfg(test)]
+mod test_support;
 mod types;
 mod variant_operations;
 
 pub use erd::*;
+pub use resolve::{Namespace, Target};
 pub use types::*;
 
 /// True when an elm.json lists a lamdera/* package, directly or indirectly.
@@ -29,6 +33,94 @@ pub fn depends_on_lamdera(elm_json: &serde_json::Value) -> bool {
         elm_json["dependencies"][kind]
             .as_object()
             .is_some_and(|packages| packages.keys().any(|name| name.starts_with("lamdera/")))
+    })
+}
+
+/// The compilers to build a project with, in the order to try them. A
+/// Lamdera project needs `lamdera`, every other one `elm`. The other one
+/// stands in on a machine that has only one of them.
+pub fn compilers_for(elm_json: &serde_json::Value) -> [&'static str; 2] {
+    if depends_on_lamdera(elm_json) {
+        ["lamdera", "elm"]
+    } else {
+        ["elm", "lamdera"]
+    }
+}
+
+/// The version that a compiler on PATH reports, `None` where it cannot be
+/// started. It is asked once, as the answer stays the same while the server runs.
+fn compiler_version(compiler: &str) -> Option<String> {
+    static VERSIONS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Option<String>>>> =
+        std::sync::OnceLock::new();
+    let versions = VERSIONS.get_or_init(Default::default);
+    if let Some(version) = versions.lock().ok()?.get(compiler) {
+        return version.clone();
+    }
+    let version = std::process::Command::new(compiler)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|version| {
+            !version.is_empty() && version.chars().all(|c| c.is_ascii_digit() || c == '.')
+        });
+    versions
+        .lock()
+        .ok()?
+        .insert(compiler.to_string(), version.clone());
+    version
+}
+
+/// The directories of ELM_HOME where the compiler that builds the project
+/// keeps the packages it downloads, then the one of elm 0.19.1. Each compiler
+/// keeps them under the version it reports, elm 0.19.1 under 0.19.1 and a
+/// recent lamdera under 0.19.3, so the two do not share them. The first of
+/// `compilers` that can be started builds the project, as for diagnostics.
+fn package_caches_of(elm_home: &Path, compilers: &[&str]) -> Vec<PathBuf> {
+    let mut caches: Vec<PathBuf> = Vec::new();
+    let versions = compilers
+        .iter()
+        .find_map(|compiler| compiler_version(compiler))
+        .into_iter()
+        // Where neither compiler can be started, the place of elm 0.19.1
+        .chain(std::iter::once("0.19.1".to_string()));
+    for version in versions {
+        let cache = elm_home.join(version).join("packages");
+        if !caches.contains(&cache) {
+            caches.push(cache);
+        }
+    }
+    caches
+}
+
+/// The directory of a package in the first of `caches` that holds it: the
+/// version that elm.json names, or for a range the newest version there is.
+fn package_in(caches: &[PathBuf], name: &str, version: &str) -> Option<PathBuf> {
+    caches.iter().find_map(|cache| {
+        let package = name
+            .split('/')
+            .fold(cache.clone(), |dir, part| dir.join(part));
+        let exact = package.join(version);
+        if exact.join("src").is_dir() {
+            return Some(exact);
+        }
+        let mut versions: Vec<PathBuf> = std::fs::read_dir(&package)
+            .ok()?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.join("src").is_dir())
+            .collect();
+        versions.sort_by_key(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| {
+                    n.split('.')
+                        .map(|part| part.parse::<u32>().unwrap_or(0))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        });
+        versions.pop()
     })
 }
 
@@ -325,6 +417,10 @@ pub struct GlobalSymbol {
     pub signature: Option<String>,
 }
 
+/// The directory of the test modules, beside elm.json, where elm-test looks
+/// for them.
+pub const TEST_DIRECTORY: &str = "tests";
+
 /// Protected files in Lamdera projects that should not be renamed/moved
 const LAMDERA_PROTECTED_FILES: &[&str] = &["Env.elm", "Types.elm", "Frontend.elm", "Backend.elm"];
 
@@ -496,6 +592,13 @@ impl Workspace {
             .iter()
             .map(|dir| self.source_directory(dir))
             .collect();
+        // elm-test compiles the modules in tests beside the source directories,
+        // and they import the project's modules, so a rename has to reach them.
+        // A test module is named by its path below tests, as elm-test names it.
+        let tests = self.source_directory(TEST_DIRECTORY);
+        if tests.is_dir() && !self.source_dirs.iter().any(|dir| is_same_file(dir, &tests)) {
+            self.source_dirs.push(tests);
+        }
     }
 
     fn parse_elm_json(&mut self, content: &str) -> anyhow::Result<()> {
@@ -532,16 +635,19 @@ impl Workspace {
 
     /// Parse dependencies from elm.json and locate package sources
     fn parse_dependencies(&mut self, json: &serde_json::Value) {
-        let elm_home = Self::get_elm_home();
+        let caches = Self::package_caches(json);
 
-        if let Some(deps) = json.get("dependencies") {
-            // Parse direct dependencies
-            if let Some(direct) = deps.get("direct") {
-                self.collect_packages(direct, &elm_home);
-            }
-            // Parse indirect dependencies
-            if let Some(indirect) = deps.get("indirect") {
-                self.collect_packages(indirect, &elm_home);
+        // The test modules can import the test-dependencies as well
+        for key in ["dependencies", "test-dependencies"] {
+            if let Some(deps) = json.get(key) {
+                // Parse direct dependencies
+                if let Some(direct) = deps.get("direct") {
+                    self.collect_packages(direct, &caches);
+                }
+                // Parse indirect dependencies
+                if let Some(indirect) = deps.get("indirect") {
+                    self.collect_packages(indirect, &caches);
+                }
             }
         }
 
@@ -549,19 +655,25 @@ impl Workspace {
     }
 
     /// Collect packages from a dependencies object
-    fn collect_packages(&mut self, deps: &serde_json::Value, elm_home: &Path) {
+    fn collect_packages(&mut self, deps: &serde_json::Value, caches: &[PathBuf]) {
         if let Some(obj) = deps.as_object() {
             for (name, version) in obj {
+                // A test-dependency can be a dependency as well
+                if self
+                    .external_packages
+                    .iter()
+                    .any(|package| package.name == *name)
+                {
+                    continue;
+                }
                 if let Some(version_str) = version.as_str() {
-                    // Try to find package in elm home
-                    let package_path = elm_home
-                        .join("0.19.1")
-                        .join("packages")
-                        .join(name.replace('/', std::path::MAIN_SEPARATOR_STR))
-                        .join(version_str)
-                        .join("src");
-
-                    if package_path.exists() {
+                    let mut exact = caches.iter().map(|cache| {
+                        name.split('/')
+                            .fold(cache.clone(), |dir, part| dir.join(part))
+                            .join(version_str)
+                            .join("src")
+                    });
+                    if let Some(package_path) = exact.find(|path| path.exists()) {
                         self.external_packages.push(ExternalPackage {
                             name: name.clone(),
                             version: version_str.to_string(),
@@ -571,6 +683,11 @@ impl Workspace {
                 }
             }
         }
+    }
+
+    /// The package caches to read the packages of the project from, see `package_caches_of`
+    fn package_caches(elm_json: &serde_json::Value) -> Vec<PathBuf> {
+        package_caches_of(&Self::get_elm_home(), &compilers_for(elm_json))
     }
 
     /// Get the Elm home directory (~/.elm or ELM_HOME)
@@ -1821,43 +1938,12 @@ impl Workspace {
     pub fn find_field_references_typed(
         &self,
         symbol: &DefinitionSymbol,
-        content: &str,
+        _content: &str,
     ) -> Vec<SymbolReference> {
-        // Get the field definition from the type checker
-        if let Some(tree) = self.type_checker.get_tree(symbol.uri.as_str()) {
-            let point = tree_sitter::Point::new(
-                symbol.range.start.line as usize,
-                symbol.range.start.character as usize,
-            );
-            if let Some(node) = Self::find_node_at_point(tree.root_node(), point) {
-                if let Some(field_def) =
-                    self.type_checker
-                        .find_field_definition(symbol.uri.as_str(), node, content)
-                {
-                    return self.find_field_references(&symbol.name, &field_def);
-                }
-            }
-        }
-
-        // Fallback: use basic filtering by kind and type_context
-        let all_refs = self.find_references(&symbol.name, symbol.module_name.as_deref());
-        all_refs
-            .into_iter()
-            .filter(|r| {
-                match r.kind {
-                    Some(BoundSymbolKind::FieldType) => {
-                        // For fields, also check type_context matches
-                        match (&r.type_context, &symbol.type_context) {
-                            (Some(ref_ctx), Some(sym_ctx)) => ref_ctx == sym_ctx,
-                            (None, None) => true,
-                            _ => true, // Be permissive if context is unknown
-                        }
-                    }
-                    None => true, // Include unknown references
-                    _ => false,
-                }
-            })
-            .collect()
+        // The same inference as the field rename, and nothing where it cannot tell
+        self.field_references_at(&symbol.uri, symbol.range.start)
+            .and_then(Result::ok)
+            .unwrap_or_default()
     }
 
     /// Find references to a port using the DefinitionSymbol
@@ -2063,107 +2149,6 @@ impl Workspace {
         Some(refs)
     }
 
-    /// Find module-aware references to a symbol
-    /// Only returns references from files that actually import the symbol from the defining module
-    pub fn find_module_aware_references(
-        &self,
-        symbol_name: &str,
-        defining_module: &str,
-        defining_uri: &Url,
-    ) -> Vec<SymbolReference> {
-        let mut results = Vec::new();
-
-        let base_name = Self::extract_base_name(symbol_name);
-
-        tracing::debug!(
-            "find_module_aware_references: symbol={}, defining_module={}, defining_uri={}",
-            base_name,
-            defining_module,
-            defining_uri.as_str()
-        );
-
-        // 1. Get refs stored under the qualified key "DefiningModule.symbol"
-        let qualified_key = format!("{}.{}", defining_module, base_name);
-        if let Some(refs) = self.references.get(&qualified_key) {
-            for r in refs {
-                tracing::debug!(
-                    "  Including qualified ref (key={}): {} {:?}",
-                    qualified_key,
-                    r.uri.as_str(),
-                    r.range
-                );
-                results.push(r.clone());
-            }
-        }
-
-        // 2. Get refs stored under the unqualified key "symbol"
-        //    Filter: only include if from defining file OR file imports symbol from defining module
-        if let Some(refs) = self.references.get(base_name) {
-            for r in refs {
-                // Always include refs from the defining file
-                if &r.uri == defining_uri {
-                    tracing::debug!(
-                        "  Including unqualified ref from definition file: {:?}",
-                        r.range
-                    );
-                    results.push(r.clone());
-                    continue;
-                }
-
-                // For other files, check if they expose the symbol from the defining module
-                let file_module = self.get_module_at_uri(&r.uri);
-                if let Some(module) = file_module {
-                    // Skip if this file defines the same-named symbol (different module)
-                    if module.module_name != defining_module {
-                        // This ref might be from a local definition or different import
-                        // Only include if the file imports this symbol from the defining module
-                        let symbol_is_exposed = module.imports.iter().any(|imp| {
-                            if imp.module_name != defining_module
-                                && imp.alias.as_deref() != Some(defining_module)
-                            {
-                                return false;
-                            }
-                            match &imp.exposing {
-                                ExposingInfo::All => true,
-                                ExposingInfo::Explicit(names) => names.iter().any(|n| {
-                                    n == base_name
-                                        || n.starts_with(&format!("{}(", base_name))
-                                        || n == &format!("{}(..)", base_name)
-                                }),
-                            }
-                        });
-
-                        if symbol_is_exposed {
-                            tracing::debug!(
-                                "  Including exposed unqualified ref from {}: {:?}",
-                                r.uri.as_str(),
-                                r.range
-                            );
-                            results.push(r.clone());
-                        } else {
-                            tracing::debug!(
-                                "  Excluding unqualified ref from {} (not exposed from {}): {:?}",
-                                r.uri.as_str(),
-                                defining_module,
-                                r.range
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        Self::deduplicate_references(&mut results);
-        results
-    }
-
-    /// Get module info for a URI
-    fn get_module_at_uri(&self, uri: &Url) -> Option<&ElmModule> {
-        self.modules
-            .values()
-            .find(|m| Url::from_file_path(&m.path).ok().as_ref() == Some(uri))
-    }
-
     /// Find definition of a symbol
     pub fn find_definition(&self, symbol_name: &str) -> Option<&GlobalSymbol> {
         // Try exact match first in local symbols
@@ -2300,296 +2285,6 @@ impl Workspace {
             return false;
         }
         true
-    }
-
-    /// Find a node by its ID
-    fn find_node_by_id(node: tree_sitter::Node, target_id: usize) -> Option<tree_sitter::Node> {
-        if node.id() == target_id {
-            return Some(node);
-        }
-
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            if let Some(found) = Self::find_node_by_id(child, target_id) {
-                return Some(found);
-            }
-        }
-
-        None
-    }
-
-    /// Find the enclosing function scope for a node (value_declaration or let_in_expr)
-    fn find_enclosing_scope(node: tree_sitter::Node) -> Option<tree_sitter::Node> {
-        let mut current = Some(node);
-        while let Some(n) = current {
-            match n.kind() {
-                "value_declaration" | "let_in_expr" => return Some(n),
-                _ => current = n.parent(),
-            }
-        }
-        None
-    }
-
-    /// Find all variable usages within a scope that match the given name
-    /// Returns a list of (range, node_id) for each usage
-    fn find_variable_usages_in_scope(
-        &self,
-        scope_node: tree_sitter::Node,
-        source: &str,
-        var_name: &str,
-        exclude_node: tree_sitter::Node,
-    ) -> Vec<(Range, usize)> {
-        let mut usages = Vec::new();
-        self.walk_for_variable_usages(scope_node, source, var_name, exclude_node.id(), &mut usages);
-        usages
-    }
-
-    /// Recursively walk the tree to find variable usages
-    fn walk_for_variable_usages(
-        &self,
-        node: tree_sitter::Node,
-        source: &str,
-        var_name: &str,
-        exclude_id: usize,
-        usages: &mut Vec<(Range, usize)>,
-    ) {
-        // Skip the excluded node (the pattern field itself)
-        if node.id() == exclude_id {
-            return;
-        }
-
-        // Check if this is a value_expr that matches our variable name
-        if node.kind() == "value_expr" || node.kind() == "lower_case_identifier" {
-            if let Ok(text) = node.utf8_text(source.as_bytes()) {
-                if text == var_name {
-                    // Check that this is a variable usage, not a field name
-                    // Field names would have parent of field_type, field_access_expr, field, etc.
-                    let parent_kind = node.parent().map(|p| p.kind());
-                    let is_field_context = matches!(
-                        parent_kind,
-                        Some("field_type")
-                            | Some("field_access_expr")
-                            | Some("field_accessor_function_expr")
-                            | Some("record_pattern")
-                    );
-                    // Also check if this is the field name in a record field (not the value)
-                    let is_field_name_in_field = if parent_kind == Some("field") {
-                        // In a `field` node, the first child is the field name
-                        node.parent()
-                            .and_then(|p| p.child(0))
-                            .map(|c| c.id() == node.id())
-                            .unwrap_or(false)
-                    } else {
-                        false
-                    };
-
-                    // Also check if this is the function being called in a function_call_expr
-                    // e.g., `emailInput userConfig ...` where emailInput is a top-level function
-                    // In this case, the identifier is NOT a variable usage of the pattern-bound name
-                    let is_function_call_target = if let Some(parent) = node.parent() {
-                        if parent.kind() == "function_call_expr" {
-                            // Check if this node is the first child (the function being called)
-                            parent
-                                .child(0)
-                                .map(|c| c.id() == node.id())
-                                .unwrap_or(false)
-                        } else if parent.kind() == "value_expr" {
-                            // value_expr might wrap the identifier, check grandparent
-                            if let Some(grandparent) = parent.parent() {
-                                if grandparent.kind() == "function_call_expr" {
-                                    grandparent
-                                        .child(0)
-                                        .map(|c| c.id() == parent.id())
-                                        .unwrap_or(false)
-                                } else {
-                                    false
-                                }
-                            } else {
-                                false
-                            }
-                        } else if parent.kind() == "value_qid" {
-                            // value_qid wraps the identifier, check grandparent (value_expr) and great-grandparent (function_call_expr)
-                            // Structure: function_call_expr → value_expr → value_qid → lower_case_identifier
-                            if let Some(grandparent) = parent.parent() {
-                                if grandparent.kind() == "value_expr" {
-                                    if let Some(great_grandparent) = grandparent.parent() {
-                                        if great_grandparent.kind() == "function_call_expr" {
-                                            great_grandparent
-                                                .child(0)
-                                                .map(|c| c.id() == grandparent.id())
-                                                .unwrap_or(false)
-                                        } else {
-                                            false
-                                        }
-                                    } else {
-                                        false
-                                    }
-                                } else {
-                                    false
-                                }
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    };
-
-                    if !is_field_context && !is_field_name_in_field && !is_function_call_target {
-                        let range = Range {
-                            start: Position::new(
-                                node.start_position().row as u32,
-                                node.start_position().column as u32,
-                            ),
-                            end: Position::new(
-                                node.end_position().row as u32,
-                                node.end_position().column as u32,
-                            ),
-                        };
-                        usages.push((range, node.id()));
-                    }
-                }
-            }
-        }
-
-        // Recurse into children
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            self.walk_for_variable_usages(child, source, var_name, exclude_id, usages);
-        }
-    }
-
-    /// Check if a scope contains other bindings for the given variable name
-    /// (case patterns, function parameters, let bindings, lambda parameters, etc.)
-    /// This is used to avoid renaming variable usages that are bound by something OTHER than
-    /// the record pattern we're processing.
-    fn scope_has_other_bindings(
-        scope_node: tree_sitter::Node,
-        source: &str,
-        var_name: &str,
-        exclude_node_id: usize,
-    ) -> bool {
-        Self::walk_for_other_bindings(scope_node, source, var_name, exclude_node_id)
-    }
-
-    /// Recursively check for variable bindings in patterns
-    fn walk_for_other_bindings(
-        node: tree_sitter::Node,
-        source: &str,
-        var_name: &str,
-        exclude_node_id: usize,
-    ) -> bool {
-        // Skip the node we're renaming (the record pattern field itself)
-        if node.id() == exclude_node_id {
-            return false;
-        }
-
-        let node_kind = node.kind();
-
-        // Check for bindings in various pattern types
-        let is_binding = match node_kind {
-            // Case pattern bindings: `Just x -> ...`
-            "pattern" | "union_pattern" | "cons_pattern" => {
-                // Look for lower_case_identifier children that match
-                let mut cursor = node.walk();
-                for child in node.children(&mut cursor) {
-                    if child.kind() == "lower_case_identifier" && child.id() != exclude_node_id {
-                        if let Ok(text) = child.utf8_text(source.as_bytes()) {
-                            if text == var_name {
-                                return true;
-                            }
-                        }
-                    }
-                }
-                false
-            }
-            // Let bindings: `let x = ... in ...`
-            "value_declaration" if node.parent().map(|p| p.kind()) == Some("let_in_expr") => {
-                // Check the function name
-                if let Some(decl) = node.child_by_field_name("functionDeclarationLeft") {
-                    if let Some(name_node) = decl.child(0) {
-                        if name_node.id() != exclude_node_id {
-                            if let Ok(text) = name_node.utf8_text(source.as_bytes()) {
-                                if text == var_name {
-                                    return true;
-                                }
-                            }
-                        }
-                    }
-                }
-                false
-            }
-            // Function parameters (excluding the record pattern itself)
-            "function_declaration_left" => {
-                // Check all patterns in the function declaration
-                let mut cursor = node.walk();
-                for child in node.children(&mut cursor) {
-                    if child.kind() == "lower_pattern" && child.id() != exclude_node_id {
-                        if let Ok(text) = child.utf8_text(source.as_bytes()) {
-                            if text == var_name {
-                                return true;
-                            }
-                        }
-                    }
-                }
-                false
-            }
-            // Lambda parameters: `\x -> ...`
-            "anonymous_function_expr" => {
-                // Check the patterns before the arrow
-                let mut cursor = node.walk();
-                for child in node.children(&mut cursor) {
-                    if (child.kind() == "pattern" || child.kind() == "lower_pattern")
-                        && child.id() != exclude_node_id
-                    {
-                        if let Ok(text) = child.utf8_text(source.as_bytes()) {
-                            if text == var_name {
-                                return true;
-                            }
-                        }
-                    }
-                }
-                false
-            }
-            // Lower case identifier in a pattern context (catch-all)
-            "lower_pattern" | "lower_case_identifier" => {
-                // Check if this is in a pattern context (case, lambda, etc.)
-                let parent_kind = node.parent().map(|p| p.kind());
-                let is_pattern_context = matches!(
-                    parent_kind,
-                    Some("pattern")
-                        | Some("union_pattern")
-                        | Some("cons_pattern")
-                        | Some("case_of_branch")
-                        | Some("anonymous_function_expr")
-                );
-                if is_pattern_context && node.id() != exclude_node_id {
-                    if let Ok(text) = node.utf8_text(source.as_bytes()) {
-                        if text == var_name {
-                            return true;
-                        }
-                    }
-                }
-                false
-            }
-            _ => false,
-        };
-
-        if is_binding {
-            return true;
-        }
-
-        // Recurse into children
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            if Self::walk_for_other_bindings(child, source, var_name, exclude_node_id) {
-                return true;
-            }
-        }
-
-        false
     }
 
     /// Classify the definition at a given position
@@ -2961,6 +2656,86 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    /// A compiler that answers `--version` with `version`, at a path of its own
+    fn fake_compiler(dir: &Path, name: &str, version: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        fs::write(&path, format!("#!/bin/sh\necho {version}\n")).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path.display().to_string()
+    }
+
+    fn put_package(cache: &Path, name: &str, version: &str) -> PathBuf {
+        let dir = name
+            .split('/')
+            .fold(cache.to_path_buf(), |dir, part| dir.join(part))
+            .join(version);
+        fs::create_dir_all(dir.join("src")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn packages_are_read_from_the_cache_of_the_compiler_that_builds_the_project() {
+        let bin = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let lamdera = fake_compiler(bin.path(), "lamdera", "0.19.3");
+        let elm = fake_compiler(bin.path(), "elm", "0.19.1");
+        let caches = package_caches_of(home.path(), &[lamdera.as_str(), elm.as_str()]);
+        assert_eq!(
+            caches,
+            vec![
+                home.path().join("0.19.3").join("packages"),
+                home.path().join("0.19.1").join("packages"),
+            ]
+        );
+
+        // A package that only lamdera downloaded is found, and its copy wins over elm's
+        let only_lamdera = put_package(&caches[0], "author/shelf", "1.0.0");
+        let both = put_package(&caches[0], "author/pile", "2.0.0");
+        put_package(&caches[1], "author/pile", "2.0.0");
+        let only_elm = put_package(&caches[1], "author/heap", "1.1.0");
+        assert_eq!(
+            package_in(&caches, "author/shelf", "1.0.0"),
+            Some(only_lamdera)
+        );
+        assert_eq!(package_in(&caches, "author/pile", "2.0.0"), Some(both));
+        assert_eq!(package_in(&caches, "author/heap", "1.1.0"), Some(only_elm));
+    }
+
+    #[test]
+    fn a_range_takes_the_newest_version_of_the_cache() {
+        let home = TempDir::new().unwrap();
+        let cache = home.path().join("0.19.1").join("packages");
+        put_package(&cache, "author/shelf", "1.2.0");
+        let newest = put_package(&cache, "author/shelf", "1.10.0");
+        assert_eq!(
+            package_in(&[cache], "author/shelf", "1.0.0 <= v < 2.0.0"),
+            Some(newest)
+        );
+    }
+
+    #[test]
+    fn without_a_compiler_the_packages_of_elm_0_19_1_are_read() {
+        let home = TempDir::new().unwrap();
+        let bin = TempDir::new().unwrap();
+        let missing = bin.path().join("no-such-compiler").display().to_string();
+        let silent = fake_compiler(bin.path(), "silent", "");
+        assert_eq!(
+            package_caches_of(home.path(), &[missing.as_str(), silent.as_str()]),
+            vec![home.path().join("0.19.1").join("packages")]
+        );
+    }
+
+    #[test]
+    fn a_lamdera_project_is_built_with_lamdera_first() {
+        let lamdera: serde_json::Value = serde_json::from_str(
+            r#"{"dependencies":{"direct":{"lamdera/core":"1.0.0"},"indirect":{}}}"#,
+        )
+        .unwrap();
+        assert_eq!(compilers_for(&lamdera), ["lamdera", "elm"]);
+        assert_eq!(compilers_for(&serde_json::Value::Null), ["elm", "lamdera"]);
+    }
+
     fn create_test_workspace() -> (TempDir, Workspace) {
         let temp_dir = TempDir::new().unwrap();
         let src_dir = temp_dir.path().join("src");
@@ -3022,7 +2797,7 @@ mod tests {
     #[test]
     fn test_an_indexed_file_outside_the_source_directories_is_compared_too() {
         let (temp_dir, mut workspace) = create_test_workspace();
-        let a_test = temp_dir.path().join("tests").join("ATest.elm");
+        let a_test = temp_dir.path().join("examples").join("ATest.elm");
         let uri = Url::from_file_path(&a_test).unwrap();
         fs::create_dir(a_test.parent().unwrap()).unwrap();
         write_settled(&a_test, "module ATest exposing (..)\n");
@@ -3290,7 +3065,7 @@ mod tests {
         let (temp_dir, mut workspace) = create_test_workspace();
         let original = temp_dir.path().join("src").join("Greeting.elm");
         // Outside the source directories, where a file enters the index with a document opened for it
-        let waiting = temp_dir.path().join("tests").join("Greeting.elm");
+        let waiting = temp_dir.path().join("examples").join("Greeting.elm");
         fs::create_dir(waiting.parent().unwrap()).unwrap();
         write_settled(&original, GREETING);
         write_settled(&waiting, GREETING);
@@ -3377,8 +3152,8 @@ mod tests {
     #[test]
     fn test_a_file_beyond_the_source_directories_survives_a_new_index() {
         let (temp_dir, mut workspace) = create_test_workspace();
-        let a_test = temp_dir.path().join("tests").join("ATest.elm");
-        let gone = temp_dir.path().join("tests").join("Gone.elm");
+        let a_test = temp_dir.path().join("examples").join("ATest.elm");
+        let gone = temp_dir.path().join("examples").join("Gone.elm");
         fs::create_dir(a_test.parent().unwrap()).unwrap();
         write_settled(
             &temp_dir.path().join("src").join("A.elm"),
@@ -3994,6 +3769,47 @@ mod tests {
                 deleted: vec![]
             }
         );
+    }
+
+    #[test]
+    fn test_the_test_modules_are_indexed_as_elm_test_reads_them() {
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(
+            temp_dir.path().join("elm.json"),
+            r#"{ "source-directories": ["src"] }"#,
+        )
+        .unwrap();
+        fs::create_dir(temp_dir.path().join("src")).unwrap();
+        write_settled(
+            &temp_dir.path().join("src/Price.elm"),
+            "module Price exposing (..)\n",
+        );
+        let mut workspace = Workspace::new(temp_dir.path().to_path_buf());
+        workspace.initialize().unwrap();
+        assert_eq!(workspace.source_dirs.len(), 1);
+
+        // tests appears later, and its modules are named by their path below it
+        let check = temp_dir
+            .path()
+            .join("tests")
+            .join("Price")
+            .join("Check.elm");
+        fs::create_dir_all(check.parent().unwrap()).unwrap();
+        write_settled(&check, "module Price.Check exposing (..)\n");
+        assert_eq!(
+            workspace.take_disk_changes(),
+            DiskChanges {
+                changed: vec![check.clone()],
+                deleted: vec![]
+            }
+        );
+        workspace.index_all_files().unwrap();
+        assert_eq!(
+            workspace.get_module("Price.Check").map(|m| &m.path),
+            Some(&check)
+        );
+        assert_eq!(workspace.module_name_at(&check).unwrap(), "Price.Check");
+        assert!(workspace.get_module("Price").is_some());
     }
 
     #[test]

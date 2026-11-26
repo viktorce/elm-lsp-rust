@@ -25,6 +25,7 @@ import { basename, dirname, join, relative } from "path";
 import { NO_SOURCES, projectDirectories } from "./elm-source.mjs";
 import { OWN_SETTINGS, ownEnvironment } from "./git.mjs";
 import { placeOf } from "./place.mjs";
+import { problem } from "./problems.mjs";
 import { runGroup } from "./process.mjs";
 
 // Output of a failing check is kept this long in a run record
@@ -222,6 +223,40 @@ export async function removeWorktree(codebase, dir) {
   });
 }
 
+/**
+ * Take `paths` out of a worktree, where a harness hands what they hold to every session whatever the
+ * session is started with. Both arms get the checkout without them. Each is removed from the files,
+ * and git is told to leave it as the commit has it, so that neither the state of the checkout nor git
+ * in a session or a check command shows the removal as a change. Only files of the commit are taken:
+ * a path that is reached through a link, or that holds something the commit does not, as what a
+ * configured link brings, is the operator's, and then nothing is taken.
+ * @param {string[]} paths  Relative to the top of the checkout
+ * @returns {Promise<string | null>}  Why the paths could not be taken, or null once they are gone
+ */
+export async function takeAway(worktree, paths) {
+  const top = realTopOf(worktree);
+  const files = [];
+  for (const path of paths) {
+    const parts = path.split("/");
+    const through = parts.slice(0, -1).findIndex((_, at) => lstatSync(join(top, ...parts.slice(0, at + 1)), { throwIfNoEntry: false })?.isSymbolicLink());
+    if (through !== -1) return `${parts.slice(0, through + 1).join("/")} is a link, and what ${path} holds lies where it leads`;
+    const committed = new Set(pathsIn(await git(top, "ls-files", "-z", "--", path)));
+    // Every file and link on the way down, without following a link
+    const onDisk = (at) => {
+      const entry = lstatSync(join(top, at));
+      return entry.isDirectory() ? readdirSync(join(top, at)).flatMap((name) => onDisk(`${at}/${name}`)) : [at];
+    };
+    const foreign = onDisk(path).find((file) => !committed.has(file));
+    if (foreign) return `${foreign} is no file of the commit`;
+    files.push(...committed);
+  }
+  if (files.length > 0) {
+    await git(top, "update-index", "--skip-worktree", "--", ...files);
+  }
+  for (const path of paths) rmSync(join(top, path), { recursive: true, force: true });
+  return null;
+}
+
 // What the directory of a checkout is called, with some letters behind it
 const CHECKOUT = "checkout-";
 
@@ -234,6 +269,40 @@ function asideOf(slot) {
     const aside = `${slot}${ASIDE}${number === 1 ? "" : `-${number}`}`;
     if (!existsSync(aside)) return aside;
   }
+}
+
+// What the directory that a harness keeps a session's own files in is called, with some letters behind
+// it. A session can see its path, so it says nothing of the arm, and it lies apart from the output
+// directory, as a checkout does. The file behind a slot's name that remembers it ends in HOME.
+const HOME_DIR = "home-";
+const HOME = ".home";
+
+/**
+ * A new, empty directory for what the harness makes for one session, as its home of the Codex CLI
+ * or its settings directory of Antigravity. `slot` remembers it until closeHome removes it, so that
+ * a benchmark that was killed leaves it where the next one finds it.
+ */
+export function openHome(slot) {
+  closeHome(slot);
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), HOME_DIR)));
+  mkdirSync(dirname(slot), { recursive: true });
+  writeFileSync(`${slot}${HOME}`, JSON.stringify({ home: dir }));
+  return dir;
+}
+
+/** Remove the directory that openHome made for `slot`, with everything in it. A link in it goes, and not what it leads to. */
+export function closeHome(slot) {
+  const file = slot.endsWith(HOME) ? slot : `${slot}${HOME}`;
+  if (!existsSync(file)) return;
+  let home;
+  try {
+    home = JSON.parse(readFileSync(file, "utf-8")).home;
+  } catch {
+    home = undefined;
+  }
+  // On the file's word, only a directory of the kind that openHome makes is removed
+  if (typeof home === "string" && basename(home).startsWith(HOME_DIR)) rmSync(home, { recursive: true, force: true });
+  rmSync(file);
 }
 
 // What a slot remembers: where its checkout is, and of which codebase. Null when the file says nothing of the kind.
@@ -298,12 +367,17 @@ export async function closeCheckout(codebase, slot) {
  * label the config now gives to another repository, where its checkout is
  * still there and no worktree of that one. Such a slot is put aside under a
  * name that no session or plan uses, since the next one of the same name
- * would drop it. Where such a checkout is still there, stderr says so.
+ * would drop it. Where such a checkout is still there, stderr says so. The
+ * directories that openHome made for sessions go as well.
  * @param {import("./config.mjs").Codebase[]} codebases
  */
 export async function closeLeftovers(workDir, codebases) {
   for (const name of existsSync(workDir) ? readdirSync(workDir) : []) {
     const slot = join(workDir, name);
+    if (name.endsWith(HOME)) {
+      closeHome(slot);
+      continue;
+    }
     const remembered = readSlot(slot);
     const codebase = codebases.find((candidate) => candidate.label === remembered?.label);
     const there = remembered !== null && existsSync(remembered.dir);
@@ -492,7 +566,7 @@ export async function isOnItsCommit(worktree) {
 
 /**
  * Run the codebase's check command. `problem` says in one sentence how it
- * failed, with the end of what it printed. `timedOut` tells a build that ran
+ * failed, with the end of what it printed, and `kind` is the kind of that. `timedOut` tells a build that ran
  * out of time, and so said nothing about the project, from one that failed.
  */
 export async function runCheck(worktree, codebase) {
@@ -500,7 +574,8 @@ export async function runCheck(worktree, codebase) {
   // A build script can catch the signal that ends it and exit as if all were well
   if (result.code === 0 && !result.timedOut) return { ok: true, timedOut: false, problem: "" };
   const output = `${result.stdout}${result.stderr}`.slice(-OUTPUT_TAIL);
-  return { ok: false, timedOut: result.timedOut, problem: result.timedOut ? "the check command ran out of time" : `the check command fails: ${output}` };
+  const found = result.timedOut ? problem("check-timed-out") : problem("check-fails", { output });
+  return { ok: false, timedOut: result.timedOut, problem: found.text, kind: found.kind };
 }
 
 /**

@@ -8,47 +8,73 @@ import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync,
 import { join, resolve } from "path";
 import { runChecks } from "../mcp-wrapper/doctor.mjs";
 import { RUST_LSP_PATH } from "../mcp-wrapper/lsp-client.mjs";
-import { agentName, ARMS, assertMcpServer, benchmarkVersion, EFFORT_LEVELS, languageServerBuilt, languageServerVersion, serverBuild } from "./lib/agent.mjs";
+import { ARMS, assertMcpServer, benchmarkVersion, languageServerBuilt, languageServerVersion, serverBuild } from "./lib/agent.mjs";
+import { DEFAULT_HARNESS, harnessIdOf, harnessOf, HARNESSES } from "./lib/harnesses/index.mjs";
 import { loadConfig } from "./lib/config.mjs";
+import { widenCheck } from "./lib/entries.mjs";
 import { assertIsolated } from "./lib/isolation.mjs";
-import { planCodebase } from "./lib/plan.mjs";
+import { DEFAULT_LEVELS } from "./lib/levels.mjs";
+import { planCodebase, shortfallLines } from "./lib/plan.mjs";
+import { runProbe } from "./lib/probe.mjs";
 import { assertProcessesVisible, Interrupted, isStopped, LONGEST_TIMEOUT_MS, stopAll } from "./lib/process.mjs";
+import { assertComparable, checkedNotes, compareRuns, renderComparison } from "./lib/compare.mjs";
 import { renderReport, summarize } from "./lib/report.mjs";
-import { plural } from "./lib/tasks.mjs";
+import { plural, TASK_TYPES, triedTargets } from "./lib/tasks.mjs";
 import { executeRun, runId } from "./lib/run.mjs";
 import { closeLeftovers } from "./lib/sandbox.mjs";
 
 const USAGE = `Usage: node benchmarks/bench.mjs <command> --out <dir> [options]
 
-  plan     Pick one target per task type in each codebase and write <out>/plan.json
+  plan     Pick one target per task type and level in each codebase and write <out>/plan.json
   run      Run every planned task in every arm and write one record per session to <out>/runs/
   report   Summarize the records into <out>/report.html and <out>/summary.json
+  compare  Put several runs side by side from their records, and write <out>/comparison.html
+           and <out>/comparison.json: compare --out <dir> <run directory>...
+  entries  Print a check command for each codebase that also compiles the modules nothing imports
+  probe    Call the language server's tools on many targets of each task type, with no agent,
+           and write the verdicts to <out>/probe/ and their counts to <out>/probe.json
 
 Options
   --out <dir>            Where the plan, the records and the report go
-  --config <file>        The codebases to run on (plan and run)
-  --min-files <n>        Fewest files a target must involve (plan, default 5)
-  --model <id>           Model for every session (run, default claude-opus-5-5)
-  --effort <level>       Effort of every session: ${EFFORT_LEVELS.join(", ")} (run, default Claude Code's for the model)
+  --config <file>        The codebases to run on (plan, run, entries and probe)
+  --min-files <n>        Fewest files a target must involve (plan and probe, default 5)
+  --levels <list>        Files a target should involve, one target per level (plan, default ${DEFAULT_LEVELS.join(",")}),
+                         or the levels whose tasks to run (run, default every level of the plan)
+  --per-type <n>         Targets per task type and codebase, spread over their sizes, or all (probe, default 30)
+  --harness <name>       Harness that runs every session: ${Object.keys(HARNESSES).join(", ")} (run, default ${DEFAULT_HARNESS.id})
+  --model <id>           Model for every session (run, default ${DEFAULT_HARNESS.defaultModel} in ${DEFAULT_HARNESS.name},
+                         required in the others)
+  --effort <level>       Effort of every session, one that the harness takes, ${DEFAULT_HARNESS.efforts.join(", ")} in
+                         ${DEFAULT_HARNESS.name} (run, default the harness's own for the model)
   --arms <list>          Arms to run (run, default ${Object.keys(ARMS).join(",")})
   --repeat <n>           Sessions per task and arm (run, default 1)
   --concurrency <n>      Sessions running at the same time (run, default 1)
-  --only <text>          Only tasks whose id contains this text (run)
-  --max-budget-usd <n>   Spending limit per session (run, default 5)
+  --only <text>          Only tasks whose id contains this text (run), or task types whose
+                         <label>/<type> does (probe)
+  --max-budget-usd <n>   Spending limit per session, where the harness reports a cost (run, default 5)
+  --max-tokens <n>       Limit of tokens per session, where the harness counts them as a session goes (run, default none)
   --timeout-min <n>      Time limit per session (run, default 20)
-  --agent <path>         Claude Code executable (run, default claude)
+  --agent <path>         The harness's executable (run, default ${Object.values(HARNESSES).map((harness) => harness.executable).join(", ")})
+  --notes <file>         A JSON file that maps a run's name, or its model's id, to paragraphs about it (compare)
 
 A run that stops, or is stopped with Ctrl-C, goes on from its last finished
-session when the same command is given again.`;
+session when the same command is given again. So does a probe, from its last
+finished target.`;
 
 class UsageError extends Error {}
 
 // Turn ["--out", "dir", "--repeat", "2"] into { out: "dir", repeat: "2" }.
 // `known` lists the options the command takes. Any other one is a mistake.
-function parseOptions(argv, known) {
-  const options = {};
+// A command that takes `paths` gets every other word, before its options or after them, in `paths`.
+function parseOptions(argv, known, paths = false) {
+  const options = paths ? { paths: [] } : {};
   for (let i = 0; i < argv.length; i += 2) {
     const name = argv[i].replace(/^--/, "");
+    if (paths && !argv[i].startsWith("--")) {
+      options.paths.push(argv[i]);
+      i -= 1;
+      continue;
+    }
     if (!argv[i].startsWith("--") || argv[i + 1] === undefined) {
       throw new UsageError(`Expected --<option> <value>, got "${argv.slice(i, i + 2).join(" ")}"`);
     }
@@ -84,6 +110,15 @@ function wholeNumber(options, name, fallback) {
   const value = options[name] ?? String(fallback);
   if (!/^[1-9]\d*$/.test(value)) throw new UsageError(`--${name} must be a whole number of 1 or more`);
   return Number(value);
+}
+
+// "100,10,50" as [10, 50, 100]. A level named twice is one level.
+function levelList(options) {
+  const words = options.levels.split(",");
+  if (!words.every((word) => /^[1-9]\d*$/.test(word))) {
+    throw new UsageError(`--levels must be whole numbers of 1 or more, separated by commas, as in ${DEFAULT_LEVELS.join(",")}`);
+  }
+  return [...new Set(words.map(Number))].sort((a, b) => a - b);
 }
 
 const hasRecords = (runsDir) => existsSync(runsDir) && readdirSync(runsDir).some((file) => file.endsWith(".json"));
@@ -204,6 +239,7 @@ function readPlan(out) {
 async function plan(options) {
   const out = resolve(required(options, "out"));
   const minFiles = wholeNumber(options, "min-files", 5);
+  const levels = options.levels === undefined ? DEFAULT_LEVELS : levelList(options);
   const { codebases } = loadConfig(resolve(required(options, "config")));
   // Records are matched to tasks by name. A new plan under old records would pair them with other targets.
   if (hasRecords(join(out, "runs"))) {
@@ -213,9 +249,9 @@ async function plan(options) {
   await closeLeftovers(join(out, "work"), codebases);
 
   // The state of the code that made the plan: what a task expects is written here, and checked later
-  const planned = { minFiles, benchmark: benchmarkVersion(), codebases: [], tasks: [] };
+  const planned = { minFiles, levels, benchmark: benchmarkVersion(), codebases: [], tasks: [] };
   for (const codebase of codebases) {
-    const { codebase: facts, tasks, skipped } = await planCodebase(codebase, { workDir: join(out, "work"), minFiles });
+    const { codebase: facts, tasks, skipped, short } = await planCodebase(codebase, { workDir: join(out, "work"), minFiles, levels });
     planned.codebases.push(facts);
     planned.tasks.push(...tasks);
     // A target is only taken from what the check command compiles, so this says how much of the project was in play
@@ -242,10 +278,12 @@ async function plan(options) {
             : "";
       // One file is named, the one that holds back the most. A project can have hundreds of them.
       const others = heldBack && heldBack.files > 1 ? `, and ${plural(heldBack.files - 1, "other such file holds", "other such files hold")} candidates back too` : "";
-      // Targets that were tried and broke nothing are the nearest cause, whatever else was held back
-      const unbrokenBuild = `. The project still compiled with the change made to ${unbroken === 1 ? "the one target that was" : `each of the ${unbroken} targets that were`} tried, so there was no work to ask for`;
-      // Next come targets that could not be tried at all
-      const notLaidOut = `. The plan adds a variant on a line of its own, as elm-format lays a type out, and ${untried === 1 ? "the one target is" : `none of the ${untried} targets is`} written that way`;
+      // Targets whose trial came out otherwise than it has to are the nearest cause, whatever else was
+      // held back. Next come targets whose trial could not be made at all.
+      const { trial } = TASK_TYPES.find((taskType) => taskType.id === type);
+      const sentence = (text) => `. ${text[0].toUpperCase()}${text.slice(1)}`;
+      const unbrokenBuild = unbroken > 0 ? sentence(trial.vain(triedTargets(unbroken))) : "";
+      const notLaidOut = untried > 0 ? sentence(trial.unmade(untried)) : "";
       // Then the candidates that suited and were left out all the same, each kind with its count
       const kinds = [
         leftOut.outside > 0 && `${leftOut.outside} that an Elm file outside the project can use`,
@@ -266,11 +304,24 @@ async function plan(options) {
                 : tooSmall;
       console.log(`${codebase.label}: no suitable target for ${type}${reason}`);
     }
+    for (const line of shortfallLines(codebase.label, short)) console.log(line);
   }
   // A stop lets the benchmark's own git commands finish, the last one that removes a checkout among them
   if (isStopped()) throw new Interrupted();
   writeJson(join(out, "plan.json"), planned);
   console.log(`Wrote ${join(out, "plan.json")}`);
+}
+
+async function entries(options) {
+  const out = resolve(required(options, "out"));
+  const { codebases } = loadConfig(resolve(required(options, "config")));
+  takeOutputDirectory(out);
+  await closeLeftovers(join(out, "work"), codebases);
+  for (const codebase of codebases) {
+    await widenCheck(codebase, { workDir: join(out, "work"), say: console.log });
+  }
+  // A stop lets the benchmark's own git commands finish, the last one that removes a checkout among them
+  if (isStopped()) throw new Interrupted();
 }
 
 const seconds = (ms) => `${Math.round(ms / 1000)}s`;
@@ -298,11 +349,14 @@ function unfitServer() {
 
 // What every session of an output directory must have in common to be compared, as the operator named it
 const SHARED = {
+  harness: "--harness",
   model: "--model",
   effort: "--effort",
   maxBudgetUsd: "--max-budget-usd",
+  maxTokens: "--max-tokens",
   timeoutMin: "--timeout-min",
   languageServer: "the language server",
+  serverSettings: "the settings of the language server",
   benchmark: "the benchmark's own code",
   // Not the operator's to name: the first session of a run says what it is
   agent: "the agent",
@@ -323,18 +377,23 @@ const SHARED = {
 function keepSettings(out, runsDir, shared, arms) {
   const path = join(out, "run.json");
   const before = existsSync(path) && hasRecords(runsDir) ? readJson(path) : null;
+  // A run.json of the time before the choice of a harness holds none, and its sessions ran in Claude Code
+  const recorded = (key) => (key === "harness" ? harnessIdOf(before[key]) : (before[key] ?? null));
   const hold = (settings) => {
     // A setting that run.json does not hold is one that was not set, as an effort is where --effort was not given
-    const changed = Object.keys(settings).filter((key) => before && (before[key] ?? null) !== (settings[key] ?? null));
+    const changed = Object.keys(settings).filter((key) => before && recorded(key) !== (settings[key] ?? null));
     if (changed.length > 0) {
-      const shown = (value) => value ?? "Claude Code's default";
-      const differences = changed.map((key) => `${SHARED[key]} was ${shown(before[key])} and is now ${shown(settings[key])}`).join(", ");
+      // An effort that was not set is the default of the harness of those sessions. A limit that was not set is none.
+      const shown = (key, value, harness) => value ?? (key === "effort" ? `${harnessOf(harness)?.name ?? harness}'s default` : "none");
+      const differences = changed
+        .map((key) => `${SHARED[key]} was ${shown(key, recorded(key), recorded("harness"))} and is now ${shown(key, settings[key], shared.harness)}`)
+        .join(", ");
       throw new Error(`${runsDir} holds records of sessions that ran differently: ${differences}. Run as before, or use another --out.`);
     }
   };
   // A server that no recorded session of the lsp arm ran with is none to hold a run to. The arm is read
   // from the records and not from their names, which hold the label of a codebase, and a label can hold "--lsp--".
-  const { languageServer, ...withoutServer } = shared;
+  const { languageServer, serverSettings, ...withoutServer } = shared;
   hold(readRecords(runsDir).some((record) => record.arm === "lsp") ? shared : withoutServer);
   // Every arm that sessions were ever started for. The report waits for each of them before it counts a round.
   const asked = Object.keys(ARMS).filter((arm) => arms.includes(arm) || before?.arms?.includes(arm));
@@ -352,30 +411,58 @@ async function run(options) {
   for (const arm of arms) {
     if (!ARMS[arm]) throw new UsageError(`Unknown arm "${arm}". Known: ${Object.keys(ARMS).join(", ")}`);
   }
-  // Without one, a session runs at the effort that Claude Code picks for its model
+  const harness = HARNESSES[options.harness ?? DEFAULT_HARNESS.id];
+  if (!harness) throw new UsageError(`Unknown harness "${options.harness}". Known: ${Object.keys(HARNESSES).join(", ")}`);
+  const model = options.model ?? harness.defaultModel;
+  if (!model) throw new UsageError(`--model is required with --harness ${harness.id}. Name the model as ${harness.executable} takes it.`);
+  // Without one, a session runs at the effort that its harness picks for its model
   const effort = options.effort ?? null;
-  if (effort !== null && !EFFORT_LEVELS.includes(effort)) {
-    throw new UsageError(`Unknown effort "${effort}". Known: ${EFFORT_LEVELS.join(", ")}`);
+  if (effort !== null && harness.efforts.length === 0) {
+    throw new UsageError(`${harness.name} has no setting of effort, so --effort cannot be given with --harness ${harness.id}. Leave it out.`);
+  }
+  if (effort !== null && !harness.efforts.includes(effort)) {
+    throw new UsageError(`Unknown effort "${effort}". Known: ${harness.efforts.join(", ")}, the levels that ${harness.name} takes`);
+  }
+  // A limit holds a session only where the harness says what the session has spent
+  if (!harness.reportsCost && options["max-budget-usd"] !== undefined) {
+    throw new UsageError(`${harness.name} reports no cost, so --max-budget-usd cannot hold its sessions. Leave it out${harness.countsTokens ? ", and use --max-tokens for a limit" : ""}.`);
+  }
+  if (!harness.countsTokens && options["max-tokens"] !== undefined) {
+    throw new UsageError(
+      harness.reportsCost
+        ? `${harness.name} is held by --max-budget-usd, and --max-tokens cannot be given with --harness ${harness.id}. Leave it out.`
+        : `${harness.name} counts tokens only when a session has ended, so --max-tokens cannot hold its sessions. Leave it out.`
+    );
   }
   const repeat = wholeNumber(options, "repeat", 1);
   const concurrency = wholeNumber(options, "concurrency", 1);
   const runsDir = join(out, "runs");
+  const told = new Set();
   const shared = {
-    model: options.model ?? "claude-opus-5-5",
+    harness: harness.id,
+    model,
     effort,
-    maxBudgetUsd: positiveNumber(options, "max-budget-usd", 5),
+    maxBudgetUsd: harness.reportsCost ? positiveNumber(options, "max-budget-usd", 5) : null,
+    maxTokens: options["max-tokens"] === undefined ? null : wholeNumber(options, "max-tokens"),
     timeoutMin: timeLimit(options),
     benchmark: benchmarkVersion(),
   };
   const settings = {
     ...shared,
+    harness,
     workDir: join(out, "work"),
     runsDir,
     // A session runs in its checkout, so a path is resolved here. A bare name is looked up on PATH.
-    agentCommand: [options.agent?.includes("/") ? resolve(options.agent) : (options.agent ?? "claude")],
+    agentCommand: [options.agent?.includes("/") ? resolve(options.agent) : (options.agent ?? harness.executable)],
     timeoutMs: shared.timeoutMin * 60 * 1000,
     // A record names it, since the time of a session depends on what runs beside it. A resumed run may take another.
     concurrency,
+    // What a harness hands every session is said once for each codebase, at its first session
+    tell: (label, text) => {
+      if (told.has(label)) return;
+      told.add(label);
+      console.log(text);
+    },
   };
   mkdirSync(runsDir, { recursive: true });
   takeOutputDirectory(out);
@@ -390,10 +477,16 @@ async function run(options) {
         `What its tasks expect may not be what this code checks. Plan again, into another --out where this one holds records.`
     );
   }
-  const tasks = planned.tasks.filter((task) => task.id.includes(options.only ?? ""));
+  const levels = options.levels === undefined ? planned.levels : levelList(options);
+  const unplanned = levels.filter((level) => !planned.levels.includes(level));
+  if (unplanned.length > 0) {
+    throw new Error(`The plan has no level ${unplanned.join(" or ")}. Its levels are ${planned.levels.join(", ")}.`);
+  }
+  const tasks = planned.tasks.filter((task) => task.id.includes(options.only ?? "") && levels.includes(task.level));
   // A text that matches no task is a mistake, and not a run with nothing left to do
   if (tasks.length === 0 && planned.tasks.length > 0) {
-    throw new Error(`No task of the plan has "${options.only}" in its id. The plan's tasks are: ${planned.tasks.map((task) => task.id).join(", ")}`);
+    const asked = [options.only !== undefined && `"${options.only}" in its id`, options.levels !== undefined && `the level ${levels.join(" or ")}`].filter(Boolean);
+    throw new Error(`No task of the plan has ${asked.join(" and ")}. The plan's tasks are: ${planned.tasks.map((task) => task.id).join(", ")}`);
   }
   const jobs = [];
   for (let repetition = 1; repetition <= repeat; repetition++) {
@@ -425,18 +518,21 @@ async function run(options) {
     const unfit = unfitServer();
     if (unfit !== null) throw new Error(unfit);
     shared.languageServer = languageServerVersion();
+    // How the harness was told to hand a session the server's tools, where it needs more than the command
+    if (harness.serverSettings) shared.serverSettings = harness.serverSettings;
     const built = languageServerBuilt();
     // A record names the build too. The run is held to its version and sources alone.
     settings.languageServer = built ? `${shared.languageServer}, built ${built}` : shared.languageServer;
   }
   const writeSettings = keepSettings(out, runsDir, shared, arms);
-  console.log(`${plural(jobs.length, "session", "sessions")} to run with ${settings.model}`);
+  console.log(`${plural(jobs.length, "session", "sessions")} to run with ${settings.model} in ${harness.name}`);
   if (jobs.length === 0) return;
   // Claude Code stops a session at the first turn that ends above its limit, so a session can pass it by that turn
-  console.log(
-    `Each is stopped once it has spent $${settings.maxBudgetUsd}, which makes about $${(jobs.length * settings.maxBudgetUsd).toFixed(0)} if every one gets that far. ` +
-      `The isolation check before them is one short session more.`
-  );
+  const limits = harness.reportsCost
+    ? `Each is stopped once it has spent $${settings.maxBudgetUsd}, which makes about $${(jobs.length * settings.maxBudgetUsd).toFixed(0)} if every one gets that far.`
+    : `${harness.name} reports no cost, so only the time limit of ${plural(settings.timeoutMin, "minute", "minutes")}` +
+      (settings.maxTokens ? ` and the limit of ${settings.maxTokens} tokens hold each session.` : ` holds each session.`);
+  console.log(`${limits} The isolation check before them is one short session more.`);
 
   assertProcessesVisible();
   // The wrapper starts the binary at a session's first tool call. One that cannot start, or does not answer what
@@ -444,11 +540,11 @@ async function run(options) {
   if (needsServer) {
     const { ok, report } = await runChecks();
     if (!ok) throw new Error(`The lsp arm needs a language server that starts and answers, and the checks of "cli.mjs doctor" fail:\n${report}`);
-    await assertMcpServer();
+    await assertMcpServer({ env: harness.environment(null) });
   }
-  // Claude Code updates itself, also between two runs into one directory, so its version is held like the model
+  // A harness updates itself, also between two runs into one directory, so its version is held like the model
   settings.agentVersion = await assertIsolated(settings);
-  writeSettings(agentName(settings.agentVersion));
+  writeSettings(harness.agentName(settings.agentVersion));
 
   // A session that cannot run at all, or that lost the API, stops the
   // benchmark. No new session starts, and the ones under way finish first,
@@ -492,16 +588,21 @@ async function run(options) {
   if (failure) throw failure;
 }
 
-function report(options) {
-  const out = resolve(required(options, "out"));
+// The plan of the run in `out`, the summary of its records and its settings, which its report and a comparison draw on
+function summaryOf(out) {
   const runsDir = join(out, "runs");
   const records = readRecords(runsDir);
   if (records.length === 0) throw new Error(`No run records in ${runsDir}. Run the run command first.`);
-
   // Written by "run". Records that were made before it existed speak for themselves.
   const settingsPath = join(out, "run.json");
-  const arms = existsSync(settingsPath) ? readJson(settingsPath).arms : undefined;
-  const summary = summarize(readPlan(out), records, arms);
+  const settings = existsSync(settingsPath) ? readJson(settingsPath) : null;
+  const plan = readPlan(out);
+  return { plan, summary: summarize(plan, records, settings?.arms), settings };
+}
+
+function report(options) {
+  const out = resolve(required(options, "out"));
+  const { summary } = summaryOf(out);
   writeJson(join(out, "summary.json"), summary);
   writeFileSync(join(out, "report.html"), renderReport(summary));
   if (summary.unpaired > 0) {
@@ -511,14 +612,46 @@ function report(options) {
   console.log(`Wrote ${join(out, "report.html")}`);
 }
 
+// Reads the records of each run and starts nothing, so it can run beside a run that is under way
+function compare(options) {
+  const out = resolve(required(options, "out"));
+  if (options.paths.length === 0) throw new UsageError("compare needs the directory of at least one run");
+  const runs = options.paths.map((dir) => ({ dir, ...summaryOf(resolve(dir)) }));
+  assertComparable(runs);
+  const summaries = runs.map(({ summary }) => summary);
+  const notes = options.notes === undefined ? {} : checkedNotes(readJson(resolve(options.notes)), summaries);
+  const comparison = compareRuns(runs);
+  mkdirSync(out, { recursive: true });
+  writeJson(join(out, "comparison.json"), comparison);
+  writeFileSync(join(out, "comparison.html"), renderComparison(comparison, summaries, notes));
+  console.log(`Wrote ${join(out, "comparison.html")}`);
+}
+
+async function probe(options) {
+  const out = resolve(required(options, "out"));
+  const minFiles = wholeNumber(options, "min-files", 5);
+  const perType = options["per-type"] === "all" ? Infinity : wholeNumber(options, "per-type", 30);
+  const { codebases } = loadConfig(resolve(required(options, "config")));
+  takeOutputDirectory(out);
+  await closeLeftovers(join(out, "work"), codebases);
+  console.log(await runProbe({ codebases, out, minFiles, perType, only: options.only ?? "", readJson, writeJson, unfitServer }));
+}
+
 const COMMANDS = {
-  plan: { run: plan, options: ["out", "config", "min-files"], interrupted: "No plan was written." },
+  plan: { run: plan, options: ["out", "config", "min-files", "levels"], interrupted: "No plan was written." },
   run: {
     run,
-    options: ["out", "config", "model", "effort", "arms", "repeat", "concurrency", "only", "max-budget-usd", "timeout-min", "agent"],
+    options: ["out", "config", "harness", "model", "effort", "arms", "repeat", "concurrency", "only", "levels", "max-budget-usd", "max-tokens", "timeout-min", "agent"],
     interrupted: "Finished sessions keep their records, and the same command picks up from there.",
   },
   report: { run: report, options: ["out"], interrupted: "" },
+  compare: { run: compare, options: ["out", "notes"], paths: true, interrupted: "" },
+  entries: { run: entries, options: ["out", "config"], interrupted: "" },
+  probe: {
+    run: probe,
+    options: ["out", "config", "min-files", "per-type", "only"],
+    interrupted: "Finished targets keep their records, and the same command picks up from there.",
+  },
 };
 
 async function main([command, ...rest]) {
@@ -530,7 +663,7 @@ async function main([command, ...rest]) {
   // A hook, or a command that "git rebase -x" runs, is told by git where its repository is. Every
   // git command below would follow that, the benchmark's own and a session's, into that repository.
   const place = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"].find((name) => process.env[name] !== undefined);
-  if (place && command !== "report") {
+  if (place && !["report", "compare"].includes(command)) {
     throw new Error(`${place} is set, so git would work in the repository it names and not in the codebases of the config. Unset it and run again.`);
   }
   // Ctrl-C, a kill and a closed terminal end the check commands and the sessions under way, each
@@ -553,7 +686,7 @@ async function main([command, ...rest]) {
     process.exitCode = 1;
     stopAll();
   });
-  await COMMANDS[command].run(parseOptions(rest, COMMANDS[command].options));
+  await COMMANDS[command].run(parseOptions(rest, COMMANDS[command].options, COMMANDS[command].paths));
 }
 
 main(process.argv.slice(2)).catch((error) => {

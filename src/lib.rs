@@ -2,6 +2,7 @@ pub mod binder;
 pub mod diagnostics;
 pub mod disjoint_set;
 pub mod document;
+pub mod field_inference;
 pub mod inference;
 pub mod parser;
 pub mod server;

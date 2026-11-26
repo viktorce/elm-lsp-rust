@@ -2,6 +2,9 @@ import { spawn, execSync } from "child_process";
 import { readFileSync, writeFileSync, copyFileSync, existsSync, mkdirSync, rmSync, readdirSync, statSync, renameSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
+import { ToolError } from "../mcp-wrapper/errors.mjs";
+import { stopClients } from "../mcp-wrapper/lsp-client.mjs";
+import { runInTurn, tools } from "../mcp-wrapper/tools.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -9,6 +12,7 @@ const PROJECT_ROOT = dirname(__dirname);
 const LSP_PATH = join(PROJECT_ROOT, "target/release/elm_lsp");
 const MEETDOWN = join(PROJECT_ROOT, "tests/meetdown");
 const BACKUP_DIR = "/tmp/meetdown_backup";
+const MOVE_FUNCTION = tools.find((tool) => tool.name === "elm_move_function");
 
 class LSPClient {
   constructor() {
@@ -334,8 +338,22 @@ class LSPClient {
     });
   }
 
+  // The tools bring the index in step with the files on disk before each call.
+  // This client writes the edits of a refactoring itself and tells the server
+  // of none of them, so a second one would be computed from the old text.
+  async syncWithDisk() {
+    const result = await this.send("workspace/executeCommand", {
+      command: "elm.syncWithDisk",
+      arguments: []
+    });
+    if (result?.synced !== true) {
+      throw new Error(`The server did not sync with disk: ${result?.error}`);
+    }
+  }
+
   async renameVariant(path, line, char, newName) {
     trackTool("elm_rename_variant");
+    await this.syncWithDisk();
     const result = await this.send("workspace/executeCommand", {
       command: "elm.renameVariant",
       arguments: [`file://${path}`, line, char, newName]
@@ -377,57 +395,25 @@ class LSPClient {
     return result;
   }
 
+  /**
+   * Move a function with the elm_move_function tool, as an agent calls it.
+   * The tool runs a language server of its own and writes the move to disk.
+   * Resolves with success and the tool's text, or with the reason it refused.
+   */
   async moveFunction(srcPath, targetPath, funcName) {
     trackTool("elm_move_function");
-    const result = await this.send("workspace/executeCommand", {
-      command: "elm.moveFunction",
-      arguments: [`file://${srcPath}`, `file://${targetPath}`, funcName]
-    });
-
-    // Apply the workspace edits if successful
-    if (result?.success && result?.changes) {
-      for (const [uri, edits] of Object.entries(result.changes)) {
-        const filePath = uri.replace("file://", "");
-        let content = readFileSync(filePath, "utf-8");
-
-        // Sort edits by position (reverse order)
-        const sortedEdits = [...edits].sort((a, b) => {
-          if (b.range.start.line !== a.range.start.line) {
-            return b.range.start.line - a.range.start.line;
-          }
-          return b.range.start.character - a.range.start.character;
-        });
-
-        const lines = content.split("\n");
-        for (const edit of sortedEdits) {
-          const startLine = edit.range.start.line;
-          const startChar = edit.range.start.character;
-          const endLine = edit.range.end.line;
-          const endChar = edit.range.end.character;
-
-          if (startLine === endLine) {
-            const line = lines[startLine] || "";
-            lines[startLine] = line.slice(0, startChar) + edit.newText + line.slice(endChar);
-          } else {
-            // Multi-line edit
-            const startLineContent = (lines[startLine] || "").slice(0, startChar);
-            const endLineContent = (lines[endLine] || "").slice(endChar);
-            const newLines = edit.newText.split("\n");
-
-            if (newLines.length === 1) {
-              lines.splice(startLine, endLine - startLine + 1, startLineContent + newLines[0] + endLineContent);
-            } else {
-              newLines[0] = startLineContent + newLines[0];
-              newLines[newLines.length - 1] = newLines[newLines.length - 1] + endLineContent;
-              lines.splice(startLine, endLine - startLine + 1, ...newLines);
-            }
-          }
-        }
-        writeFileSync(filePath, lines.join("\n"));
-      }
+    // The tool finds the function by one of its lines
+    const line = readFileSync(srcPath, "utf-8")
+      .split("\n")
+      .findIndex((text) => text.startsWith(`${funcName} `));
+    if (line === -1) throw new Error(`${srcPath} declares no function ${funcName}`);
+    try {
+      const text = await runInTurn(MOVE_FUNCTION, { file_path: srcPath, line, function_name: funcName, target_module: targetPath });
+      return { success: true, changes: true, message: text };
+    } catch (error) {
+      if (!(error instanceof ToolError)) throw error;
+      return { success: false, message: error.message };
     }
-
-    return result;
   }
 
   stop() { this.process?.kill(); }
@@ -2166,13 +2152,11 @@ async function main() {
         const compileResult = compileMeetdown();
         logTest("Code compiles after move", compileResult.success, compileResult.error?.substring(0, 200));
       } else {
-        // Move may fail if function has dependencies
-        console.log(`     → Move not possible: ${result?.message || "Function may have dependencies"}`);
-        logTest("Move handled gracefully", result?.message !== undefined || true);
+        console.log(`     → Move refused: ${result?.message}`);
+        logTest("Move refused with a reason", Boolean(result?.message));
       }
     } catch (e) {
-      console.log(`     → Move function: ${e.message}`);
-      logTest("Move handled gracefully", true);
+      logTest("Move ran without an error", false, e.message);
     } finally {
       await restoreMeetdown(client);
     }
@@ -2198,12 +2182,11 @@ async function main() {
         const compileResult = compileMeetdown();
         logTest("Code compiles after move", compileResult.success, compileResult.error?.substring(0, 200));
       } else {
-        console.log(`     → Move result: ${result?.message || "Function may have dependencies"}`);
-        logTest("Move handled gracefully", true);
+        console.log(`     → Move refused: ${result?.message}`);
+        logTest("Move refused with a reason", Boolean(result?.message));
       }
     } catch (e) {
-      console.log(`     → Move function: ${e.message}`);
-      logTest("Move handled gracefully", true);
+      logTest("Move ran without an error", false, e.message);
     } finally {
       await restoreMeetdown(client);
     }
@@ -2229,20 +2212,19 @@ async function main() {
         const compileResult = compileMeetdown();
         logTest("Code compiles after move", compileResult.success, compileResult.error?.substring(0, 200));
       } else {
-        console.log(`     → Move result: ${result?.message || "Function may have dependencies"}`);
-        logTest("Move handled gracefully", true);
+        console.log(`     → Move refused: ${result?.message}`);
+        logTest("Move refused with a reason", Boolean(result?.message));
       }
     } catch (e) {
-      console.log(`     → Move function: ${e.message}`);
-      logTest("Move handled gracefully", true);
+      logTest("Move ran without an error", false, e.message);
     } finally {
       await restoreMeetdown(client);
     }
     console.log();
   }
 
-  // ===== TEST 72: Move function (GroupName.tooShort → Group) =====
-  startTest(72, "Move function (GroupName.tooShort → Group)");
+  // ===== TEST 72: Move function (GroupName.namesMatch → Group) =====
+  startTest(72, "Move function (GroupName.namesMatch → Group)");
   {
     backupMeetdown();
     try {
@@ -2251,7 +2233,7 @@ async function main() {
       await client.openFile(srcFile);
       await client.openFile(targetFile);
 
-      const result = await client.moveFunction(srcFile, targetFile, "tooShort");
+      const result = await client.moveFunction(srcFile, targetFile, "namesMatch");
 
       if (result?.success) {
         logTest("Move succeeded", true);
@@ -2260,12 +2242,11 @@ async function main() {
         const compileResult = compileMeetdown();
         logTest("Code compiles after move", compileResult.success, compileResult.error?.substring(0, 200));
       } else {
-        console.log(`     → Move result: ${result?.message || "Function may have dependencies"}`);
-        logTest("Move handled gracefully", true);
+        console.log(`     → Move refused: ${result?.message}`);
+        logTest("Move refused with a reason", Boolean(result?.message));
       }
     } catch (e) {
-      console.log(`     → Move function: ${e.message}`);
-      logTest("Move handled gracefully", true);
+      logTest("Move ran without an error", false, e.message);
     } finally {
       await restoreMeetdown(client);
     }
@@ -2291,12 +2272,11 @@ async function main() {
         const compileResult = compileMeetdown();
         logTest("Code compiles after move", compileResult.success, compileResult.error?.substring(0, 200));
       } else {
-        console.log(`     → Move result: ${result?.message || "Function may have dependencies"}`);
-        logTest("Move handled gracefully", true);
+        console.log(`     → Move refused: ${result?.message}`);
+        logTest("Move refused with a reason", Boolean(result?.message));
       }
     } catch (e) {
-      console.log(`     → Move function: ${e.message}`);
-      logTest("Move handled gracefully", true);
+      logTest("Move ran without an error", false, e.message);
     } finally {
       await restoreMeetdown(client);
     }
@@ -2340,7 +2320,7 @@ async function main() {
       const result1 = await client.renameVariant(typesFile, defLine, 6, "PendingLoginStatus");
 
       if (!result1?.success) {
-        throw new Error(`First rename failed: ${result1?.message || "unknown error"}`);
+        throw new Error(`First rename failed: ${result1?.error || "unknown error"}`);
       }
       console.log(`     → First rename: ${result1.editsApplied} edits`);
 
@@ -2380,7 +2360,7 @@ async function main() {
       const result2 = await client.renameVariant(typesFile, newDefLine, 6, "LoginStatusPending");
 
       if (!result2?.success) {
-        throw new Error(`Second rename failed: ${result2?.message || "unknown error"}`);
+        throw new Error(`Second rename failed: ${result2?.error || "unknown error"}`);
       }
       console.log(`     → Second rename: ${result2.editsApplied} edits`);
 
@@ -3417,6 +3397,7 @@ async function main() {
   console.log(`__COVERAGE_JSON_END__`);
 
   client.stop();
+  stopClients();
 
   if (failed > 0) {
     console.log(`${RED}${"=".repeat(70)}${RESET}`);
@@ -3434,6 +3415,7 @@ async function main() {
 }
 
 main().catch(err => {
+  stopClients();
   console.error(`${RED}Fatal error: ${err.message}${RESET}`);
   console.error(err.stack);
   console.log(`\n${YELLOW}If this error persists, please file an issue:${RESET}`);

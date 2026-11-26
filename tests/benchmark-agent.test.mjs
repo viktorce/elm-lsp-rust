@@ -9,7 +9,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "fs";
 import { dirname, join, relative } from "path";
-import { BENCHMARK_SOURCES, summarizeTranscript } from "../benchmarks/lib/agent.mjs";
+import { BENCHMARK_SOURCES } from "../benchmarks/lib/agent.mjs";
+import { summarizeTranscript } from "../benchmarks/lib/harnesses/claude-code.mjs";
 import { REPO } from "./support.mjs";
 import { BENCH } from "./benchmark-support.mjs";
 
@@ -68,12 +69,27 @@ test("a transcript is condensed into the session's figures", () => {
     lspCalls: 2,
   });
 
+  // A count that Claude Code gives as null is none, as before there was a choice of harness
+  const uncached = summarizeTranscript([
+    { type: "system", subtype: "init" },
+    { type: "result", subtype: "success", usage: { input_tokens: 7, cache_creation_input_tokens: null, cache_read_input_tokens: null, output_tokens: 3 } },
+  ]);
+  assert.deepEqual(
+    [uncached.inputTokens, uncached.cacheCreationInputTokens, uncached.cacheReadInputTokens, uncached.outputTokens],
+    [7, 0, 0, 3]
+  );
+
   // A session that was killed has no result event
   const killed = summarizeTranscript([{ type: "system", subtype: "init", mcp_servers: [] }, toolUse("Bash")]);
   assert.equal(killed.finished, false);
   assert.equal(killed.stopReason, "no result");
   assert.equal(killed.lspStatus, "absent");
   assert.equal(killed.costUsd, null);
+  // Nor any tokens, which Claude Code counts in the same event as the cost
+  assert.deepEqual(
+    [killed.inputTokens, killed.cacheCreationInputTokens, killed.cacheReadInputTokens, killed.outputTokens],
+    [null, null, null, null]
+  );
 
   // Claude Code was asking the API again when the session ended, at the first request or a later one.
   // An answer that came after all ends the wait.
