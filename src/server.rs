@@ -8,10 +8,33 @@ use tower_lsp::{Client, LanguageServer};
 use crate::diagnostics::{DiagnosticsProvider, NoVerdict};
 use crate::document::{Document, VariantInfo};
 use crate::parser::ElmParser;
-use crate::workspace::{BranchConfig, Workspace};
+use crate::workspace::{BranchConfig, Namespace, SymbolReference, Target, Workspace};
+
+/// The places a rename of the target changes, or the reason it must not be
+/// done, which names the place. Such a rename would change what a name means.
+fn resolved_rename(
+    workspace: &Workspace,
+    target: &Target,
+    new_name: &str,
+) -> Result<Vec<SymbolReference>> {
+    let refusal = |reason: String| tower_lsp::jsonrpc::Error {
+        code: tower_lsp::jsonrpc::ErrorCode::InvalidRequest,
+        message: format!(
+            "Cannot rename {} to {}: {}. No file was changed",
+            target.name, new_name, reason
+        )
+        .into(),
+        data: None,
+    };
+    match workspace.rename_references(target, new_name) {
+        Ok(Ok(references)) => Ok(references),
+        Ok(Err(reason)) => Err(refusal(reason)),
+        Err(e) => Err(refusal(e.to_string())),
+    }
+}
 
 // Custom commands
-const CMD_MOVE_FUNCTION: &str = "elm.moveFunction";
+const CMD_PLAN_MOVE_FUNCTION: &str = "elm.planMoveFunction";
 const CMD_GET_DIAGNOSTICS: &str = "elm.getDiagnostics";
 const CMD_PREPARE_REMOVE_VARIANT: &str = "elm.prepareRemoveVariant";
 const CMD_REMOVE_VARIANT: &str = "elm.removeVariant";
@@ -333,6 +356,53 @@ impl ElmLanguageServer {
         "unknown"
     }
 
+    /// The references of the function, the type or the variant that the name
+    /// at the position resolves to: the places that its rename changes, and
+    /// no namesake. A record alias and its constructor are one name. `None`
+    /// for anything else, such as a local variable or a field.
+    fn resolved_references(
+        &self,
+        uri: &Url,
+        position: Position,
+        include_declaration: bool,
+    ) -> Option<Vec<Location>> {
+        let ws = self.workspace.read().ok()?;
+        let workspace = ws.as_ref()?;
+        let (module, name, namespace) = workspace.target_at(uri, position).ok()??;
+        let namespaces =
+            if namespace != Namespace::Value && workspace.is_record_alias(&module, &name) {
+                vec![Namespace::Type, Namespace::Constructor]
+            } else {
+                vec![namespace]
+            };
+        // In the order of the files and of the places in each. The name of a
+        // record alias is both a type and a constructor, and counts once.
+        let mut places = std::collections::BTreeSet::new();
+        for namespace in namespaces {
+            let target = Target {
+                module: &module,
+                name: &name,
+                namespace,
+            };
+            for uses in workspace.uses_of(&target).ok()? {
+                for (range, is_declaration) in uses.places {
+                    if include_declaration || !is_declaration {
+                        places.insert((uses.uri.clone(), range.start, range.end));
+                    }
+                }
+            }
+        }
+        Some(
+            places
+                .into_iter()
+                .map(|(uri, start, end)| Location {
+                    uri,
+                    range: Range::new(start, end),
+                })
+                .collect(),
+        )
+    }
+
     /// Rename a symbol by its name directly (without using position lookup)
     fn rename_symbol_by_name(
         &self,
@@ -341,40 +411,6 @@ impl ElmLanguageServer {
         new_name: &str,
     ) -> Result<Option<WorkspaceEdit>> {
         tracing::info!("Renaming {} to {}", name, new_name);
-
-        // Check for shadowing: does the new name already exist in the defining file?
-        // Read file content directly since document might not be opened
-        if let Ok(file_path) = uri.to_file_path() {
-            if let Ok(content) = std::fs::read_to_string(&file_path) {
-                // Look for the new name as a word boundary match (not substring)
-                let mut search_pos = 0;
-                while let Some(pos) = content[search_pos..].find(new_name) {
-                    let abs_pos = search_pos + pos;
-                    let in_a_name = |c: char| c.is_alphanumeric() || c == '_';
-                    let before_ok = !content[..abs_pos]
-                        .chars()
-                        .next_back()
-                        .is_some_and(in_a_name);
-                    let after_ok = !content[abs_pos + new_name.len()..]
-                        .chars()
-                        .next()
-                        .is_some_and(in_a_name);
-                    if before_ok && after_ok {
-                        // Found a match - this would cause shadowing
-                        let line_num = content[..abs_pos].matches('\n').count() + 1;
-                        tracing::info!(
-                            "Shadowing detected: '{}' already exists in {} at line {}",
-                            new_name,
-                            file_path.display(),
-                            line_num
-                        );
-                        return Ok(None);
-                    }
-                    // On behind the first character of this match, which can be more than one byte
-                    search_pos = abs_pos + new_name.chars().next().map_or(1, char::len_utf8);
-                }
-            }
-        }
 
         let mut changes: std::collections::HashMap<Url, Vec<TextEdit>> =
             std::collections::HashMap::new();
@@ -416,57 +452,28 @@ impl ElmLanguageServer {
                             new_text: new_name.to_string(),
                         });
 
-                    // For types with same-named constructors (e.g., `type EventId = EventId Int`),
-                    // also add the constructor definition to the changes
-                    if symbol.kind == SymbolKind::ENUM {
-                        if let Some(module) = workspace.get_module(&symbol.module_name) {
-                            if let Some(elm_symbol) = module.symbols.iter().find(|s| s.name == name)
-                            {
-                                for variant in &elm_symbol.variants {
-                                    if variant.name == name {
-                                        let key = (
-                                            symbol.definition_uri.to_string(),
-                                            variant.range.start.line,
-                                            variant.range.start.character,
-                                            variant.range.end.line,
-                                            variant.range.end.character,
-                                        );
-                                        if !seen_ranges.contains(&key) {
-                                            seen_ranges.insert(key);
-                                            changes
-                                                .entry(symbol.definition_uri.clone())
-                                                .or_default()
-                                                .push(TextEdit {
-                                                    range: variant.range,
-                                                    new_text: new_name.to_string(),
-                                                });
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                    // The uses that resolve to this declaration, and no namesake. A record
+                    // alias takes along its constructor, which is the alias itself. A
+                    // variant called like its type is not, and keeps its name.
+                    let namespaces: &[Namespace] = if symbol.kind == SymbolKind::FUNCTION
+                        || symbol.kind == SymbolKind::INTERFACE
+                    {
+                        &[Namespace::Value]
+                    } else if workspace.is_record_alias(&symbol.module_name, name) {
+                        &[Namespace::Type, Namespace::Constructor]
+                    } else {
+                        &[Namespace::Type]
+                    };
+                    let mut refs = Vec::new();
+                    for &namespace in namespaces {
+                        let target = Target {
+                            module: &symbol.module_name,
+                            name,
+                            namespace,
+                        };
+                        refs.extend(resolved_rename(workspace, &target, new_name)?);
                     }
-
-                    // Use module-aware references to only rename in files that import this symbol
-                    let refs = workspace.find_module_aware_references(
-                        name,
-                        &symbol.module_name,
-                        &symbol.definition_uri,
-                    );
                     for r in refs {
-                        // Skip Evergreen files - they are migration snapshots
-                        if r.uri.path().contains("/Evergreen/") {
-                            continue;
-                        }
-                        // Filter references by kind based on what we're renaming
-                        // For functions, exclude field accesses (a.name is not a function ref)
-                        if symbol.kind == SymbolKind::FUNCTION {
-                            if let Some(ref_kind) = &r.kind {
-                                if matches!(ref_kind, crate::binder::BoundSymbolKind::FieldType) {
-                                    continue;
-                                }
-                            }
-                        }
                         // Skip if we already have an edit for this exact range
                         let key = (
                             r.uri.to_string(),
@@ -556,15 +563,17 @@ impl ElmLanguageServer {
             new_text: new_name.to_string(),
         });
 
-        // Get all references from workspace
+        // The uses that resolve to this variant, and no variant or type of its name
         if let Ok(ws) = self.workspace.read() {
             if let Some(workspace) = ws.as_ref() {
-                let refs = workspace.find_references(variant_name, None);
+                let module_name = workspace.get_module_name_from_uri(uri);
+                let target = Target {
+                    module: &module_name,
+                    name: variant_name,
+                    namespace: Namespace::Constructor,
+                };
+                let refs = resolved_rename(workspace, &target, new_name)?;
                 for r in refs {
-                    // Skip Evergreen files
-                    if r.uri.path().contains("/Evergreen/") {
-                        continue;
-                    }
                     // Skip if we already have an edit for this exact range
                     let key = (
                         r.uri.to_string(),
@@ -719,7 +728,7 @@ impl LanguageServer for ElmLanguageServer {
                 document_formatting_provider: Some(OneOf::Left(true)),
                 execute_command_provider: Some(ExecuteCommandOptions {
                     commands: vec![
-                        CMD_MOVE_FUNCTION.to_string(),
+                        CMD_PLAN_MOVE_FUNCTION.to_string(),
                         CMD_GET_DIAGNOSTICS.to_string(),
                         CMD_PREPARE_REMOVE_VARIANT.to_string(),
                         CMD_REMOVE_VARIANT.to_string(),
@@ -1001,12 +1010,36 @@ impl LanguageServer for ElmLanguageServer {
         let position = params.text_document_position.position;
         self.refuse_a_waiting_file(uri)?;
 
+        if let Some(locations) =
+            self.resolved_references(uri, position, params.context.include_declaration)
+        {
+            return Ok(Some(locations));
+        }
+
         // Get file content for type-aware field finding
         let content = if let Some(doc) = self.documents.get(uri) {
             doc.text.clone()
         } else {
             String::new()
         };
+
+        // A field: type inference tells which record each use belongs to, and
+        // where it cannot be sure, the answer says so instead of a list
+        if let Ok(ws) = self.workspace.read() {
+            if let Some(workspace) = ws.as_ref() {
+                if let Some(found) = workspace.field_references_at(uri, position) {
+                    let refs = found.map_err(tower_lsp::jsonrpc::Error::invalid_params)?;
+                    return Ok(Some(
+                        refs.into_iter()
+                            .map(|r| Location {
+                                uri: r.uri,
+                                range: r.range,
+                            })
+                            .collect(),
+                    ));
+                }
+            }
+        }
 
         // Try to classify the symbol at position for type-aware finding
         let symbol = if let Ok(ws) = self.workspace.read() {
@@ -1272,17 +1305,13 @@ impl LanguageServer for ElmLanguageServer {
         self.refuse_a_waiting_file(uri)?;
 
         // First check if this is a field rename
-        if let Some(doc) = self.documents.get(uri) {
-            if let Ok(ws) = self.workspace.read() {
-                if let Some(workspace) = ws.as_ref() {
-                    if let Some(field_info) =
-                        workspace.get_field_at_position(uri, position, &doc.text)
-                    {
-                        return Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
-                            range: field_info.range,
-                            placeholder: field_info.name.clone(),
-                        }));
-                    }
+        if let Ok(ws) = self.workspace.read() {
+            if let Some(workspace) = ws.as_ref() {
+                if let Some((name, range)) = workspace.field_name_at_position(uri, position) {
+                    return Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
+                        range,
+                        placeholder: name,
+                    }));
                 }
             }
         }
@@ -1327,48 +1356,30 @@ impl LanguageServer for ElmLanguageServer {
         let new_name = params.new_name;
         self.refuse_a_waiting_file(uri)?;
 
-        // First check if this is a field rename
-        if let Some(doc) = self.documents.get(uri) {
-            if let Ok(ws) = self.workspace.read() {
-                if let Some(workspace) = ws.as_ref() {
-                    let field_result = workspace.get_field_at_position(uri, position, &doc.text);
-                    if let Some(field_info) = field_result {
-                        tracing::info!(
-                            "Renaming field {} in type alias {:?} to {}",
-                            field_info.name,
-                            field_info.definition.type_alias_name,
-                            new_name
-                        );
-
-                        // Find all field references using type inference
-                        let refs = workspace
-                            .find_field_references(&field_info.name, &field_info.definition);
-
-                        let mut changes: std::collections::HashMap<Url, Vec<TextEdit>> =
-                            std::collections::HashMap::new();
-
-                        for r in refs {
-                            // Note: For record pattern fields like `{ email }`, the bound variable
-                            // usages in the function scope are automatically included by
-                            // find_field_references via find_variable_usages_in_scope.
-                            changes.entry(r.uri).or_default().push(TextEdit {
-                                range: r.range,
-                                new_text: new_name.clone(),
-                            });
-                        }
-
-                        if !changes.is_empty() {
-                            tracing::info!(
-                                "Field rename affects {} files, {} edits",
-                                changes.len(),
-                                changes.values().map(|v| v.len()).sum::<usize>()
-                            );
-                            return Ok(Some(WorkspaceEdit {
-                                changes: Some(changes),
-                                ..Default::default()
-                            }));
-                        }
+        // First check if this is a field rename. Type inference tells which
+        // record each use of the field belongs to, and where it cannot be
+        // sure, the rename is refused rather than guessed.
+        if let Ok(ws) = self.workspace.read() {
+            if let Some(workspace) = ws.as_ref() {
+                if let Some(plan) = workspace.rename_field_at(uri, position, &new_name) {
+                    let refs = plan.map_err(tower_lsp::jsonrpc::Error::invalid_params)?;
+                    let mut changes: std::collections::HashMap<Url, Vec<TextEdit>> =
+                        std::collections::HashMap::new();
+                    for r in refs {
+                        changes.entry(r.uri).or_default().push(TextEdit {
+                            range: r.range,
+                            new_text: new_name.clone(),
+                        });
                     }
+                    tracing::info!(
+                        "Field rename affects {} files, {} edits",
+                        changes.len(),
+                        changes.values().map(|v| v.len()).sum::<usize>()
+                    );
+                    return Ok(Some(WorkspaceEdit {
+                        changes: Some(changes),
+                        ..Default::default()
+                    }));
                 }
             }
         }
@@ -1517,69 +1528,53 @@ impl LanguageServer for ElmLanguageServer {
         }
 
         match params.command.as_str() {
-            CMD_MOVE_FUNCTION => {
-                // Expected arguments: [source_uri, function_name, target_path]
-                if params.arguments.len() != 3 {
-                    return Ok(Some(serde_json::json!({
-                        "error": "Expected 3 arguments: source_uri, function_name, target_path"
-                    })));
-                }
-
-                let source_uri: String = serde_json::from_value(params.arguments[0].clone())
-                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
-                let function_name: String = serde_json::from_value(params.arguments[1].clone())
-                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
-                let target_path: String = serde_json::from_value(params.arguments[2].clone())
-                    .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
-
-                tracing::info!(
-                    "Moving {} from {} to {}",
-                    function_name,
-                    source_uri,
-                    target_path
-                );
-
-                let source_uri = Url::parse(&source_uri).map_err(|e| {
-                    tower_lsp::jsonrpc::Error::invalid_params(format!("Invalid source URI: {}", e))
-                })?;
-                let target_path = PathBuf::from(&target_path);
-
-                // Execute the move - extract result before any awaits
-                let move_result = {
-                    if let Ok(ws) = self.workspace.read() {
-                        if let Some(workspace) = ws.as_ref() {
-                            workspace.move_function(&source_uri, &function_name, &target_path)
-                        } else {
-                            Err(anyhow::anyhow!("Workspace not initialized"))
-                        }
-                    } else {
-                        Err(anyhow::anyhow!("Could not acquire workspace lock"))
-                    }
+            CMD_PLAN_MOVE_FUNCTION => {
+                // Expected arguments: [source_uri, function_name, target_uri]. The
+                // reply has "plan", what the move changes beyond the lines of the
+                // function, or "refusal", why it cannot be made right.
+                let argument = |at: usize| -> Result<String> {
+                    params
+                        .arguments
+                        .get(at)
+                        .cloned()
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?
+                        .ok_or_else(|| {
+                            tower_lsp::jsonrpc::Error::invalid_params(
+                                "Expected 3 arguments: source_uri, function_name, target_uri",
+                            )
+                        })
                 };
+                let path_of = |uri: String| {
+                    Url::parse(&uri)
+                        .ok()
+                        .and_then(|uri| uri.to_file_path().ok())
+                        .ok_or_else(|| {
+                            tower_lsp::jsonrpc::Error::invalid_params(format!(
+                                "Invalid URI: {}",
+                                uri
+                            ))
+                        })
+                };
+                let source_path = path_of(argument(0)?)?;
+                let function_name = argument(1)?;
+                let target_path = path_of(argument(2)?)?;
 
-                match move_result {
-                    Ok(result) => {
-                        // Convert to workspace edit and apply
-                        let edit = WorkspaceEdit {
-                            changes: Some(result.changes),
-                            ..Default::default()
-                        };
-
-                        // Apply the edit
-                        let _ = self.client.apply_edit(edit).await;
-
-                        Ok(Some(serde_json::json!({
-                            "success": true,
-                            "sourceModule": result.source_module,
-                            "targetModule": result.target_module,
-                            "functionName": result.function_name,
-                            "referencesUpdated": result.references_updated
-                        })))
-                    }
-                    Err(e) => Ok(Some(serde_json::json!({
-                        "error": e.to_string()
-                    }))),
-                }
+                let planned = match self.workspace.read() {
+                    Ok(ws) => match ws.as_ref() {
+                        Some(workspace) => {
+                            workspace.plan_move(&source_path, &function_name, &target_path)
+                        }
+                        None => Err(anyhow::anyhow!("Workspace not initialized")),
+                    },
+                    Err(_) => Err(anyhow::anyhow!("Could not acquire workspace lock")),
+                };
+                Ok(Some(match planned {
+                    Ok(Ok(plan)) => serde_json::json!({ "plan": plan }),
+                    Ok(Err(refusal)) => serde_json::json!({ "refusal": refusal }),
+                    Err(e) => serde_json::json!({ "error": e.to_string() }),
+                }))
             }
             CMD_GET_DIAGNOSTICS => {
                 // Expected arguments: [file_uri]
@@ -1773,36 +1768,40 @@ impl LanguageServer for ElmLanguageServer {
                 if let Some((type_name, variant, idx, total, all_variants)) =
                     self.get_variant_at_position(&uri, position)
                 {
-                    // Get all usages
-                    let all_usages = if let Ok(ws) = self.workspace.read() {
-                        if let Some(workspace) = ws.as_ref() {
-                            let module_name = workspace.get_module_name_from_uri(&uri);
-                            workspace.get_variant_usages(&uri, &variant.name, Some(&module_name))
-                        } else {
-                            Vec::new()
-                        }
-                    } else {
-                        Vec::new()
+                    // The preview lists what the removal would change, and why it would change nothing
+                    let planned = match self.workspace.read() {
+                        Ok(ws) => match ws.as_ref() {
+                            Some(workspace) => {
+                                workspace.plan_variant_removal(&uri, &type_name, &variant.name)
+                            }
+                            None => Err(anyhow::anyhow!("Workspace not initialized")),
+                        },
+                        Err(_) => Err(anyhow::anyhow!("Could not acquire workspace lock")),
                     };
-
-                    // Only constructor usages are truly blocking
-                    let blocking_usages: Vec<_> = all_usages
-                        .iter()
-                        .filter(|u| u.is_blocking)
-                        .cloned()
-                        .collect();
-
-                    // Pattern match usages can be auto-removed
-                    let pattern_usages: Vec<_> = all_usages
-                        .iter()
-                        .filter(|u| !u.is_blocking)
-                        .cloned()
-                        .collect();
-
+                    let planned = match planned {
+                        Ok(planned) => planned,
+                        Err(e) => {
+                            return Ok(Some(serde_json::json!({
+                                "success": false,
+                                "message": e.to_string()
+                            })))
+                        }
+                    };
+                    let (can_remove, reason, blocking_usages, pattern_usages, redundant_usages) =
+                        match planned {
+                            Ok(removal) => (
+                                total > 1,
+                                None,
+                                removal.replaced,
+                                removal.removed,
+                                removal.redundant,
+                            ),
+                            Err(reason) => {
+                                (false, Some(reason), Vec::new(), Vec::new(), Vec::new())
+                            }
+                        };
                     let blocking_count = blocking_usages.len();
                     let pattern_count = pattern_usages.len();
-                    // Can always remove if more than 1 variant - constructor usages will be replaced with Debug.todo
-                    let can_remove = total > 1;
 
                     // Other variants (excluding the one being removed)
                     let other_variants: Vec<&String> = all_variants
@@ -1820,8 +1819,10 @@ impl LanguageServer for ElmLanguageServer {
                         "blockingCount": blocking_count,
                         "patternCount": pattern_count,
                         "canRemove": can_remove,
+                        "reason": reason,
                         "blockingUsages": blocking_usages,
                         "patternUsages": pattern_usages,
+                        "redundantUsages": redundant_usages,
                         "range": {
                             "start": { "line": variant.range.start.line, "character": variant.range.start.character },
                             "end": { "line": variant.range.end.line, "character": variant.range.end.character }
@@ -2163,7 +2164,7 @@ impl LanguageServer for ElmLanguageServer {
                         }))),
                         Err(e) => Ok(Some(serde_json::json!({
                             "success": false,
-                            "error": e.to_string()
+                            "error": e.message
                         }))),
                     }
                 } else {
@@ -2266,7 +2267,7 @@ impl LanguageServer for ElmLanguageServer {
                         }))),
                         Err(e) => Ok(Some(serde_json::json!({
                             "success": false,
-                            "error": e.to_string()
+                            "error": e.message
                         }))),
                     }
                 } else {
@@ -2359,7 +2360,7 @@ impl LanguageServer for ElmLanguageServer {
                         }))),
                         Err(e) => Ok(Some(serde_json::json!({
                             "success": false,
-                            "error": e.to_string()
+                            "error": e.message
                         }))),
                     }
                 } else {
@@ -2504,7 +2505,13 @@ impl LanguageServer for ElmLanguageServer {
                     }
                 };
 
-                if let Some((type_name, field_name, all_fields, usages)) = result {
+                if let Some(Err(reason)) = result {
+                    return Ok(Some(serde_json::json!({
+                        "success": false,
+                        "error": reason
+                    })));
+                }
+                if let Some(Ok((type_name, field_name, all_fields, usages))) = result {
                     let other_fields: Vec<&String> =
                         all_fields.iter().filter(|f| *f != &field_name).collect();
 
@@ -2535,6 +2542,12 @@ impl LanguageServer for ElmLanguageServer {
                         .iter()
                         .filter(|u| u.usage_type == crate::workspace::FieldUsageType::RecordUpdate)
                         .count();
+                    let pattern_variable_count = usages
+                        .iter()
+                        .filter(|u| {
+                            u.usage_type == crate::workspace::FieldUsageType::PatternVariable
+                        })
+                        .count();
 
                     Ok(Some(serde_json::json!({
                         "success": true,
@@ -2550,6 +2563,7 @@ impl LanguageServer for ElmLanguageServer {
                         "recordPatternCount": record_pattern_count,
                         "recordLiteralCount": record_literal_count,
                         "recordUpdateCount": record_update_count,
+                        "patternVariableCount": pattern_variable_count,
                         "totalUsages": usages.len()
                     })))
                 } else {
@@ -2591,20 +2605,26 @@ impl LanguageServer for ElmLanguageServer {
                     }
                 };
 
-                if let Some((type_name, field_name, all_fields, _)) = field_info {
+                if let Some(Err(reason)) = field_info {
+                    return Ok(Some(serde_json::json!({
+                        "success": false,
+                        "error": reason
+                    })));
+                }
+                if let Some(Ok((type_name, field_name, all_fields, usages))) = field_info {
                     let other_fields: Vec<&String> =
                         all_fields.iter().filter(|f| *f != &field_name).collect();
 
-                    // Execute removal
+                    // The edits of the uses that the inference found
                     let remove_result = {
                         if let Ok(ws) = self.workspace.read() {
                             if let Some(workspace) = ws.as_ref() {
-                                workspace.remove_field(
-                                    &uri,
+                                Ok(workspace.remove_field(
                                     &type_name,
                                     &field_name,
                                     all_fields.len(),
-                                )
+                                    &usages,
+                                ))
                             } else {
                                 Err(anyhow::anyhow!("Workspace not initialized"))
                             }
@@ -2729,7 +2749,8 @@ impl LanguageServer for ElmLanguageServer {
                     "variantName": result.variant_name,
                     "existingVariants": result.existing_variants,
                     "caseExpressions": case_expressions_json,
-                    "casesNeedingBranch": result.cases_needing_branch
+                    "casesNeedingBranch": result.cases_needing_branch,
+                    "unhandled": result.unhandled
                 })))
             }
             CMD_ADD_VARIANT => {

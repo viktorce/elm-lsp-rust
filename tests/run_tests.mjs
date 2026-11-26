@@ -17,7 +17,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
-import { readFileSync, writeFileSync, existsSync, copyFileSync, rmSync, mkdirSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, copyFileSync, rmSync, mkdirSync, mkdtempSync, cpSync, readdirSync } from "fs";
+import { tmpdir } from "os";
 import { execSync } from "child_process";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -27,6 +28,7 @@ const __dirname = dirname(__filename);
 const MCP_SERVER = join(__dirname, "../mcp-wrapper/index.mjs");
 const FIXTURE_DIR = join(__dirname, "fixture");
 const BACKUP_DIR = join(__dirname, "fixture-backup");
+const FIELD_FIXTURES = join(__dirname, "fixture-fields");
 
 // Test state
 let client = null;
@@ -190,8 +192,8 @@ async function testReferences() {
 
   assertContains(result, "Main.elm", "References should include Main.elm");
   assertContains(result, "Utils.elm", "References should include Utils.elm");
-  // Verify we find multiple references (6: exposing list + 2 imports + 3 type annotations)
-  assertContains(result, "6 references", "Should find 6 references");
+  // The declaration, the exposing list, 2 imports and 3 type annotations. The client asks for the declaration.
+  assertContains(result, "7 references", "Should find 7 references");
 
   logTest("references: find all User references", true);
 }
@@ -336,6 +338,177 @@ async function testRenameField() {
   } finally {
     restoreFixture();
   }
+}
+
+/**
+ * Rename a field in a fresh copy of a project of tests/fixture-fields, and
+ * give the tool's answer, the text of each file afterwards and whether the
+ * project compiles. Each call works on files of its own, so nothing needs
+ * to be put back.
+ */
+async function renameFieldInFixture(fixture, file, line, character, oldName, newName) {
+  return callToolInFieldFixture(fixture, "elm_rename_field", file, { line, character, old_name: oldName, newName });
+}
+
+/** Call a tool on a file of a fresh copy of a project of tests/fixture-fields, as renameFieldInFixture does */
+async function callToolInFieldFixture(fixture, tool, file, args) {
+  const dir = mkdtempSync(join(tmpdir(), `elm-lsp-field-${fixture}-`));
+  cpSync(join(FIELD_FIXTURES, fixture), dir, { recursive: true });
+  let answer;
+  try {
+    answer = await callTool(tool, { file_path: join(dir, "src", file), ...args });
+  } catch (error) {
+    answer = error.message;
+  }
+  const files = {};
+  for (const path of readdirSync(join(dir, "src"), { recursive: true })) {
+    if (path.endsWith(".elm")) files[path] = readFileSync(join(dir, "src", path), "utf-8");
+  }
+  const read = (path) => files[path];
+  const original = (path) => readFileSync(join(FIELD_FIXTURES, fixture, "src", path), "utf-8");
+  let compiles = true;
+  let error = "";
+  try {
+    execSync(`elm make src/Main.elm --output=/dev/null 2>&1`, { cwd: dir, encoding: "utf8", timeout: 60000 });
+  } catch (e) {
+    compiles = false;
+    error = e.stdout || e.message;
+  }
+  rmSync(dir, { recursive: true, force: true });
+  return { answer, read, original, compiles, error };
+}
+
+function assertCompiles(result) {
+  if (!result.compiles) {
+    throw new Error(`The project does not compile after the rename: ${result.error.substring(0, 300)}`);
+  }
+}
+
+// The uses of a field that the tool has to reach although no annotation names their record's type
+async function testRenameFieldUnannotatedUses() {
+  const result = await renameFieldInFixture("unannotated-uses", "Account.elm", 4, 6, "title", "heading");
+  assertContains(result.answer, "2 files (10 total edits)", "Every use of the field should be renamed");
+  const main = result.read("Main.elm");
+  for (const use of ["login.account.heading", "List.map .heading accounts", "\\{ heading } -> heading", "{ heading = \"Savings\""]) {
+    assertContains(main, use, "A use of the field should be renamed");
+  }
+  assertCompiles(result);
+  logTest("rename field: uses in chained access, case, let, lambda, accessor and lambda pattern", true);
+}
+
+// Another module with an alias of the same name must not change which alias an annotation names
+async function testRenameFieldNamesakeAlias() {
+  // The answer once depended on the order of a hash map, which differs from one call to the next
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const result = await renameFieldInFixture("namesake-alias", "Item.elm", 4, 6, "title", "heading");
+    assertContains(result.answer, "2 files (5 total edits)", `Attempt ${attempt + 1} should rename all five uses`);
+    assertCompiles(result);
+  }
+  logTest("rename field: an alias of the same name elsewhere changes nothing, on every call", true);
+}
+
+// A record update of another record type, in a lambda in a case branch, keeps its field
+async function testRenameFieldOtherRecordInLambda() {
+  const result = await renameFieldInFixture("other-record-in-lambda", "Tile.elm", 4, 6, "title", "heading");
+  assertContains(result.answer, "2 files (3 total edits)", "Only the uses of Tile should be renamed");
+  if (result.read("Draft.elm") !== result.original("Draft.elm")) {
+    throw new Error(`Draft.elm should not change: ${result.answer}`);
+  }
+  assertCompiles(result);
+  logTest("rename field: a record update of another record in a case branch stays", true);
+}
+
+// A record pattern on a record type that an annotation writes without an alias keeps its field
+async function testRenameFieldInlineRecordPattern() {
+  const result = await renameFieldInFixture("inline-record-pattern", "Notice.elm", 5, 6, "action", "verb");
+  assertContains(result.answer, "2 files (3 total edits)", "The alias, the record it builds and the access should be renamed");
+  assertContains(result.read("Notice.elm"), "fromPayload { title, action } =", "The pattern on the record without an alias should stay");
+  assertCompiles(result);
+  logTest("rename field: a record pattern on a record type without an alias stays", true);
+}
+
+// Records of two aliases that pass through one function have to keep one field name
+async function testRenameFieldSharedRecordRefused() {
+  const result = await renameFieldInFixture("shared-record", "Tile.elm", 4, 6, "title", "heading");
+  assertContains(result.answer, "not possible", "The rename should be refused");
+  assertContains(result.answer, "Draft.Draft", "The refusal should name the other alias");
+  for (const file of ["Tile.elm", "Draft.elm", "Main.elm"]) {
+    if (result.read(file) !== result.original(file)) {
+      throw new Error(`${file} changed although the rename was refused`);
+    }
+  }
+  logTest("rename field: records of two aliases that meet are refused, and nothing changes", true);
+}
+
+// The uses that elm_references gives for a field are those that its rename changes
+async function testReferencesOfField() {
+  const fromAlias = await callToolInFieldFixture("unannotated-uses", "elm_references", "Account.elm", { line: 4, character: 6 });
+  assertContains(fromAlias.answer, "Found 10 references", "Every use that the rename changes should be listed");
+  const renamed = await renameFieldInFixture("unannotated-uses", "Account.elm", 4, 6, "title", "heading");
+  assertContains(renamed.answer, "(10 total edits)", "The rename should change the same places");
+  // From the accessor in Main.elm, line 34 in the editor
+  const fromUse = await callToolInFieldFixture("unannotated-uses", "elm_references", "Main.elm", { line: 33, character: 14 });
+  assertContains(fromUse.answer, "Found 10 references", "A use should find the same places");
+  // Another alias's field of the same name is no reference, two records that values pass through are
+  const other = await callToolInFieldFixture("remove-field", "elm_references", "Other.elm", { line: 4, character: 6 });
+  assertContains(other.answer, "Found 5 references", "Other's field should have its own uses only");
+  const shared = await callToolInFieldFixture("shared-record", "elm_references", "Tile.elm", { line: 4, character: 6 });
+  assertContains(shared.answer, "Draft.elm", "The record that values pass through should be listed");
+  logTest("references: a field's uses are the places its rename changes, for its record alone", true);
+}
+
+// Removing a field changes every use of its record, written on one line or one per line, and compiles
+async function testRemoveFieldEveryShape() {
+  const result = await callToolInFieldFixture("remove-field", "elm_remove_field", "Account.elm", { line: 4, character: 6, field_name: "title" });
+  assertContains(result.answer, "Successfully", "The field should be removed");
+  const main = result.read("Main.elm");
+  for (const removed of [
+    "twoFields { owner } =",
+    "List.map (\\_ -> (Debug.todo",
+    "List.map (\\_ -> Debug.todo",
+    "retitled account =\n    account\n",
+    "{ account | rank = 1 }",
+    "titleOf : a -> String",
+    "inline : { owner : String, rank : Int } -> Account",
+    "{ owner = \"Ada\"\n    , rank = 2",
+    "other.title ++ Other.describe { title = \"o\", size = 1 }",
+    "otherTitle { title = \"\", size = 0 }",
+  ]) {
+    assertContains(main, removed, "A use of the field should be removed");
+  }
+  if (result.read("Other.elm") !== result.original("Other.elm")) {
+    throw new Error("Other.elm has a field of its own and should not change");
+  }
+  assertContains(result.read("Account.elm"), "{ owner = \"\", rank = 0 }", "The record in Account.elm should lose the field");
+  assertCompiles(result);
+  logTest("remove field: every shape of use, the other alias's field stays, and it compiles", true);
+}
+
+// Removing a field is refused, and nothing changes, where it cannot be done right
+async function testRemoveFieldRefusals() {
+  for (const [fixture, file, line, field_name, reason] of [
+    ["remove-field-constructor", "Account.elm", 4, "title", "called as a constructor at"],
+    ["shared-record", "Tile.elm", 4, "title", "Draft.Draft"],
+    ["remove-field-type-variable", "Form.elm", 7, "note", "the type variable `extra`"],
+  ]) {
+    const result = await callToolInFieldFixture(fixture, "elm_remove_field", file, { line, character: 6, field_name });
+    assertContains(result.answer, "not possible", "The removal should be refused");
+    assertContains(result.answer, reason, "The refusal should name the place");
+    for (const path of readdirSync(join(FIELD_FIXTURES, fixture, "src"))) {
+      if (result.read(path) !== result.original(path)) {
+        throw new Error(`${path} changed although the removal was refused`);
+      }
+    }
+  }
+  // Another field that uses the variable keeps it in use
+  const kept = await callToolInFieldFixture("remove-field-type-variable", "elm_remove_field", "Form.elm", { line: 5, character: 6, field_name: "result" });
+  assertContains(kept.answer, "Successfully", "A variable that another field uses should not stop the removal");
+  assertCompiles(kept);
+  // The base of an extensible record uses its variable as well
+  const extensible = await callToolInFieldFixture("remove-field-type-variable", "elm_remove_field", "Form.elm", { line: 19, character: 10, field_name: "label" });
+  assertContains(extensible.answer, "Successfully", "The base of the record should keep its variable in use");
+  assertCompiles(extensible);
+  logTest("remove field: a constructor call, records that meet and a type variable left unused are refused, and nothing changes", true);
 }
 
 async function testRenameVariant() {
@@ -1175,6 +1348,12 @@ async function runTests() {
       ["Rename Function", testRename],
       ["Rename Type Alias", testRenameTypeAlias],
       ["Rename Field", testRenameField],
+      ["Rename Field (uses without annotations)", testRenameFieldUnannotatedUses],
+      ["Rename Field (alias of the same name)", testRenameFieldNamesakeAlias],
+      ["Rename Field (other record in a lambda)", testRenameFieldOtherRecordInLambda],
+      ["Rename Field (record pattern without an alias)", testRenameFieldInlineRecordPattern],
+      ["Rename Field (records that meet)", testRenameFieldSharedRecordRefused],
+      ["References (field)", testReferencesOfField],
       ["Rename Variant", testRenameVariant],
       ["Diagnostics (no errors)", testDiagnostics],
       ["Diagnostics (with error)", testDiagnosticsWithError],
@@ -1194,6 +1373,8 @@ async function runTests() {
       ["Add Variant", testAddVariant],
       ["Add Variant (with case expression)", testAddVariantWithCaseExpression],
       ["Remove Field (first field)", testRemoveFieldFirstField],
+      ["Remove Field (every shape)", testRemoveFieldEveryShape],
+      ["Remove Field (refusals)", testRemoveFieldRefusals],
       ["Rename File", testRenameFile],
       ["Move File", testMoveFile],
     ];

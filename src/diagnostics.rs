@@ -1,9 +1,9 @@
 use serde::Deserialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range, Url};
 
-use crate::workspace::depends_on_lamdera;
+use crate::workspace::{compilers_for, TEST_DIRECTORY};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -149,16 +149,11 @@ impl DiagnosticsProvider {
     /// elm.json names and its node_modules may pin. The other one is a
     /// stand-in for a machine that has only one of them installed.
     fn compilers_for(workspace_root: &str) -> [&'static str; 2] {
-        let is_lamdera = std::fs::read_to_string(Path::new(workspace_root).join("elm.json"))
+        let elm_json = std::fs::read_to_string(Path::new(workspace_root).join("elm.json"))
             .ok()
             .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-            .is_some_and(|elm_json| depends_on_lamdera(&elm_json));
-
-        if is_lamdera {
-            ["lamdera", "elm"]
-        } else {
-            ["elm", "lamdera"]
-        }
+            .unwrap_or_default();
+        compilers_for(&elm_json)
     }
 
     /// Run elm/lamdera make on a file and report what the compiler said.
@@ -178,13 +173,19 @@ impl DiagnosticsProvider {
             .or_else(|| Self::find_workspace_root(&file_path))
             .ok_or_else(|| NoVerdict::Other(format!("No elm.json found for {}", file_path)))?;
 
+        // A test module is built where its imports can be found
+        let build_root = match Self::test_project_for(&workspace_root, &file_path)? {
+            Some(directory) => directory.to_string_lossy().to_string(),
+            None => workspace_root.clone(),
+        };
+
         // The first compiler that can be started does the build
         let output = Self::compilers_for(&workspace_root)
             .into_iter()
             .find_map(|compiler| {
                 Command::new(compiler)
                     .args(["make", &file_path, "--report=json", "--output=/dev/null"])
-                    .current_dir(&workspace_root)
+                    .current_dir(&build_root)
                     .output()
                     .ok()
             });
@@ -198,8 +199,124 @@ impl DiagnosticsProvider {
 
         // elm make outputs JSON to stderr
         let stderr = String::from_utf8_lossy(&output.stderr);
-        self.parse_elm_output(&stderr, &file_path, &workspace_root)
+        self.parse_elm_output(&stderr, &file_path, &build_root)
             .map_err(NoVerdict::Other)
+    }
+
+    /// The directory to build a test module in, or `None` for a file that is
+    /// no test module. elm-test compiles the modules in tests with the source
+    /// directories of elm.json and its test-dependencies, and elm make knows
+    /// neither, so it cannot find what a test module imports. The build of a
+    /// test module runs in a project of its own outside the user's, whose
+    /// elm.json adds those two the way elm-test does.
+    fn test_project_for(
+        workspace_root: &str,
+        file_path: &str,
+    ) -> Result<Option<PathBuf>, NoVerdict> {
+        let root = Path::new(workspace_root);
+        let tests = root.join(TEST_DIRECTORY);
+        let file = Path::new(file_path);
+        let under = |dir: &Path| {
+            file.starts_with(dir)
+                || matches!((file.canonicalize(), dir.canonicalize()), (Ok(f), Ok(d)) if f.starts_with(&d))
+        };
+        if !under(&tests) {
+            return Ok(None);
+        }
+        let unreadable = |reason: String| {
+            NoVerdict::Other(format!(
+                "{} is a test module, and elm.json could not be read to build it: {}",
+                file_path, reason
+            ))
+        };
+        let text = std::fs::read_to_string(root.join("elm.json"))
+            .map_err(|e| unreadable(e.to_string()))?;
+        let mut elm_json: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| unreadable(e.to_string()))?;
+        let listed: Vec<String> = elm_json
+            .get("source-directories")
+            .and_then(|dirs| dirs.as_array())
+            .map(|dirs| {
+                dirs.iter()
+                    .filter_map(|dir| dir.as_str())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        // A file that a source directory holds is the project's own and builds with it
+        if listed.iter().any(|dir| under(&root.join(dir))) {
+            return Ok(None);
+        }
+        if elm_json.get("type").and_then(|t| t.as_str()) != Some("application") {
+            return Err(NoVerdict::Other(format!(
+                "{} is a test module of a package. elm make cannot build it, because elm-test picks the versions of a package's test-dependencies. Run the project's tests to check it",
+                file_path
+            )));
+        }
+
+        let mut directories: Vec<serde_json::Value> = listed
+            .iter()
+            .map(|dir| serde_json::Value::from(root.join(dir).to_string_lossy().to_string()))
+            .collect();
+        directories.push(tests.to_string_lossy().to_string().into());
+        elm_json["source-directories"] = directories.into();
+        let test_dependencies = elm_json
+            .get("test-dependencies")
+            .cloned()
+            .unwrap_or_default();
+        for group in ["direct", "indirect"] {
+            let Some(extra) = test_dependencies.get(group).and_then(|g| g.as_object()) else {
+                continue;
+            };
+            let Some(dependencies) = elm_json
+                .get_mut("dependencies")
+                .and_then(|deps| deps.get_mut(group))
+                .and_then(|g| g.as_object_mut())
+            else {
+                continue;
+            };
+            for (name, version) in extra {
+                dependencies
+                    .entry(name.clone())
+                    .or_insert_with(|| version.clone());
+            }
+        }
+        // A package that the tests use directly and the application indirectly is direct now
+        let direct: Vec<String> = elm_json["dependencies"]["direct"]
+            .as_object()
+            .map(|direct| direct.keys().cloned().collect())
+            .unwrap_or_default();
+        if let Some(indirect) = elm_json["dependencies"]["indirect"].as_object_mut() {
+            indirect.retain(|name, _| !direct.contains(name));
+        }
+        elm_json["test-dependencies"] = serde_json::json!({ "direct": {}, "indirect": {} });
+
+        // One directory for each project, so the compiler's cache in it is kept between builds
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(
+            &root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
+            &mut hasher,
+        );
+        let directory = std::env::temp_dir().join(format!(
+            "elm-lsp-test-modules-{:016x}",
+            std::hash::Hasher::finish(&hasher)
+        ));
+        let generated =
+            serde_json::to_string_pretty(&elm_json).map_err(|e| unreadable(e.to_string()))?;
+        let cannot_write = |e: std::io::Error| {
+            NoVerdict::Other(format!(
+                "{} is a test module, and the project to build it in could not be written at {}: {}",
+                file_path,
+                directory.display(),
+                e
+            ))
+        };
+        std::fs::create_dir_all(&directory).map_err(cannot_write)?;
+        let target = directory.join("elm.json");
+        if std::fs::read_to_string(&target).ok().as_deref() != Some(generated.as_str()) {
+            std::fs::write(&target, generated).map_err(cannot_write)?;
+        }
+        Ok(Some(directory))
     }
 
     /// `root` is the directory the compiler ran in. Its relative paths start there.

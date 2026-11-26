@@ -372,13 +372,31 @@ function withImport(lines, importLine, { firstImport, below, moduleDoc } = headO
   return [...lines.slice(0, last + 1), "", importLine, ...lines.slice(last + 1)];
 }
 
+// Where the first import of a module that has no exposing list ends, in a file: behind the name
+// of the module, or behind its alias. -1 where every import of it has a list, or where it has none.
+function plainImportEnd(content, moduleName) {
+  const code = withoutComments(content);
+  const { lines, to } = importLines(code);
+  const head = lines.slice(0, to).join("\n");
+  const name = moduleName.replaceAll(".", "\\.");
+  for (const found of head.matchAll(new RegExp(`^import\\s+${name}(?:\\s+as\\s+[\\p{L}\\d_]+)?(?![\\p{L}\\d_.])`, "gmu"))) {
+    // The rest of the import: the lines below it that do not start in the first column
+    const rest = head.slice(found.index + found[0].length).match(/^[^\n]*(?:\n[ \t][^\n]*)*/)[0];
+    if (!/(^|\s)exposing(\s|\(|$)/.test(rest)) return found.index + found[0].length;
+  }
+  return -1;
+}
+
 // The text with a name exposed from an import of a module: in the first exposing list of such
-// an import, unless one of them has the name or everything already, and in an import of its own
-// where the file has no such list.
+// an import, unless one of them has the name or everything already. Where the file imports the
+// module without a list, that import gets one. A file without an import of the module gets an
+// import of its own.
 function withExposed(content, moduleName, name, head) {
   const lists = importedLists(content, moduleName);
-  if (lists.length === 0) return withImport(content.split("\n"), `import ${moduleName} exposing (${name})`, head).join("\n");
-  return lists.map((list) => withItem(content, list, name)).includes(null) ? content : withItem(content, lists[0], name);
+  if (lists.length > 0) return lists.map((list) => withItem(content, list, name)).includes(null) ? content : withItem(content, lists[0], name);
+  const plain = plainImportEnd(content, moduleName);
+  if (plain !== -1) return `${content.slice(0, plain)} exposing (${name})${content.slice(plain)}`;
+  return withImport(content.split("\n"), `import ${moduleName} exposing (${name})`, head).join("\n");
 }
 
 // What the disk knows a regular file by, whatever name leads to it: a link to a file and a
@@ -428,15 +446,12 @@ function elmFilesIn(dir, seen) {
   return files;
 }
 
-// Point an importing file at the function's new module. Returns the new
-// content, or null when the file does not expose the function from the source.
-function retargetImport(content, functionName, sourceModuleName, targetModuleName) {
+// The text without the function in the exposing lists of its imports of the source module. A
+// file can import a module more than once. An import that exposed nothing else stays without its
+// list, because the file can name the module by itself as well, as in Utils.greet. The same text
+// where no import lists the function.
+function withoutListed(content, functionName, sourceModuleName) {
   const listing = (text) => importedLists(text, sourceModuleName).find((list) => indexIn(list, functionName) !== -1);
-  if (!listing(content)) return null;
-
-  // Drop the function from every import of the source that lists it, since a file can import a
-  // module more than once. One that exposed nothing else stays without its list, because the
-  // file can name the module by itself as well, as in Utils.greet.
   let without = content;
   for (let source = listing(without); source; source = listing(without)) {
     without =
@@ -444,9 +459,63 @@ function retargetImport(content, functionName, sourceModuleName, targetModuleNam
         ? withoutItem(without, source, indexIn(source, functionName))
         : without.slice(0, source.exposing).trimEnd() + without.slice(source.close + 1);
   }
+  return without;
+}
 
-  // Expose it from an import of the target instead
-  return withExposed(without, targetModuleName, functionName);
+// The text with names written anew, each on one line and given by the language server with
+// columns in bytes. The edits do not overlap, and they are made from the last one up, so that
+// each keeps its place.
+function withEdits(content, edits = []) {
+  const lines = content.split("\n");
+  const sorted = [...edits].sort((a, b) => b.range.start.line - a.range.start.line || b.range.start.character - a.range.start.character);
+  for (const { range, newText } of sorted) {
+    const line = lines[range.start.line];
+    lines[range.start.line] = line.slice(0, indexOfColumn(line, range.start.character)) + newText + line.slice(indexOfColumn(line, range.end.character));
+  }
+  return lines.join("\n");
+}
+
+// Point a file that names the function at its new module. A call with a qualifier names the new
+// module, which a file without an import of it gets. A file that calls the function bare or lists
+// it in an import of the source takes it by name from the new module instead. Returns the new
+// content, or null where nothing changes.
+function retargeted(content, functionName, sourceModuleName, targetModuleName, { edits, bare = false, needsImport = false } = {}) {
+  const rewritten = withEdits(content, edits);
+  const without = withoutListed(rewritten, functionName, sourceModuleName);
+  const moved =
+    bare || without !== rewritten
+      ? withExposed(without, targetModuleName, functionName)
+      : needsImport
+        ? withImport(without.split("\n"), `import ${targetModuleName}`).join("\n")
+        : without;
+  return moved === content ? null : moved;
+}
+
+// What the language server makes of the move: how the names of the function are written in the
+// target, which modules the target imports for them, and which files name the function. A move
+// that cannot be made right is refused here, with the place and the reason, before any file
+// changes. Edits and files are given by their paths, which fileAt turns into the files they are.
+async function planOf(client, absPath, functionName, absTargetModule) {
+  const answer = await client.executeCommand("elm.planMoveFunction", [toFileUri(absPath), functionName, toFileUri(absTargetModule)]);
+  if (answer?.refusal) {
+    throw new ToolError(`Cannot move function: moving "${functionName}" is not possible: ${answer.refusal}. No file was changed`);
+  }
+  if (!answer?.plan) {
+    const unknown = !answer?.error || answer.error.startsWith("Unknown command");
+    throw new ToolError(unknown ? "Cannot move function: the language server is older than this MCP server. Build it again" : `Cannot move function: ${answer.error}`);
+  }
+  const { edits, targetImports, calledAtHome, users } = answer.plan;
+  const editsOf = new Map(Object.entries(edits).map(([path, fileEdits]) => [fileAt(path), fileEdits]));
+  return {
+    targetImports,
+    calledAtHome,
+    editsAt: (path) => editsOf.get(fileAt(path)) ?? [],
+    userAt: (path) => {
+      const file = fileAt(path);
+      const user = users.find((each) => fileAt(each.path) === file);
+      return { edits: editsOf.get(file), bare: user?.bare, needsImport: user?.needsImport };
+    },
+  };
 }
 
 /**
@@ -467,10 +536,8 @@ export async function moveFunction({ client, workspaceRoot, absPath, absTargetMo
   const sourceLines = sourceContent.split("\n");
   assertPlaced(sourceLines, absPath, functionName, { first, last, before, unread });
   const targetContent = readForEdit(absTargetModule);
-  const targetLines = targetContent.split("\n");
 
   const [start, end] = [withDocComment(sourceLines, first, before), withClosingComments(sourceLines, last)];
-  const functionText = sourceLines.slice(start, end + 1).join("\n");
   const sourceModuleName = moduleNameOf(sourceContent, absPath);
   const targetModuleName = moduleNameOf(targetContent, absTargetModule);
 
@@ -482,19 +549,27 @@ export async function moveFunction({ client, workspaceRoot, absPath, absTargetMo
       `Cannot move function: Target module '${targetModuleName}' already has a function named '${functionName}'`
     );
   }
+  const plan = await planOf(client, absPath, functionName, absTargetModule);
+  // The function as the target writes its names. Each edit stays on its line.
+  const functionText = withEdits(sourceContent, plan.editsAt(absPath)).split("\n").slice(start, end + 1).join("\n");
 
-  // Target: append the function two blank lines below the last line that holds something, and expose it
-  let insertLine = targetLines.length;
-  while (insertLine > 0 && targetLines[insertLine - 1].trim() === "") {
+  // Target: its own calls of the function name it bare, and no import of the source lists it.
+  // It imports the modules that the function takes names from. The function goes two blank lines
+  // below the last line that holds something, and is exposed.
+  const targetHead = withoutListed(withEdits(targetContent, plan.editsAt(absTargetModule)), functionName, sourceModuleName);
+  // Each import goes in front of the first one, so the last comes first, and they stand in their order
+  const importedLines = plan.targetImports.reduceRight((lines, module) => withImport(lines, `import ${module}`), targetHead.split("\n"));
+  let insertLine = importedLines.length;
+  while (insertLine > 0 && importedLines[insertLine - 1].trim() === "") {
     insertLine--;
   }
-  const appended = [...targetLines.slice(0, insertLine), "", "", functionText, ""].join("\n");
+  const appended = [...importedLines.slice(0, insertLine), "", "", functionText, ""].join("\n");
   const targetList = declaredList(appended);
   const exposed = targetList && withItem(appended, targetList, functionName);
 
-  // Source: cut the function, import it from the target instead, and stop exposing it. The
-  // blank lines above the function and below it meet where it stood. The longer of the two runs
-  // stays, and at the end of the file no more than its last line end.
+  // Source: cut the function, import it from the target where it is called elsewhere, and stop
+  // exposing it. The blank lines above the function and below it meet where it stood. The longer
+  // of the two runs stays, and at the end of the file no more than its last line end.
   const newSourceLines = [...sourceLines];
   newSourceLines.splice(start, end - start + 1);
   let [above, below] = [start, start];
@@ -508,27 +583,29 @@ export async function moveFunction({ client, workspaceRoot, absPath, absTargetMo
   newSourceLines.splice(above, below - above, ...Array(blank).fill(""));
   // The head is read from the file as it was. With its first function gone, the doc comment of
   // the next one could pass for the module's, and the import would part the two.
-  const cut = withExposed(newSourceLines.join("\n"), targetModuleName, functionName, headOf(sourceLines));
+  const cut = plan.calledAtHome
+    ? withExposed(newSourceLines.join("\n"), targetModuleName, functionName, headOf(sourceLines))
+    : newSourceLines.join("\n");
   const sourceList = declaredList(cut);
   const exposedAt = sourceList ? indexIn(sourceList, functionName) : -1;
   // A list has to hold something, so the only name in one stays
   const stays = exposedAt !== -1 && sourceList.items.length === 1;
   const hidden = exposedAt === -1 || stays ? cut : withoutItem(cut, sourceList, exposedAt);
 
-  // Every other file that exposed the function from the source module. All of
-  // them are read before the first file is written, so that a file that cannot
-  // be read stops the move while nothing has changed yet.
+  // Every other file that names the function or lists it in an import of the source module. All
+  // of them are read before the first file is written, so that a file that cannot be read stops
+  // the move while nothing has changed yet.
   // A source directory can lie outside the project root, and one inside it is walked with the root.
   // The two modules of the move are no other files, under any of their names: what is written for
   // a link to the target would put the target back as it was, and the function would be in no file.
   const seen = new Set([fileAt(absPath), fileAt(absTargetModule)]);
   const others = projectDirectories(workspaceRoot).flatMap((directory) => elmFilesIn(directory, seen));
-  const retargeted = others
-    .map((elmFile) => [elmFile, retargetImport(readForEdit(elmFile), functionName, sourceModuleName, targetModuleName)])
+  const users = others
+    .map((elmFile) => [elmFile, retargeted(readForEdit(elmFile), functionName, sourceModuleName, targetModuleName, plan.userAt(elmFile))])
     .filter(([, newContent]) => newContent !== null);
-  const filesUpdated = retargeted.length;
+  const filesUpdated = users.length;
 
-  const written = [[absPath, hidden], [absTargetModule, exposed ?? appended], ...retargeted];
+  const written = [[absPath, hidden], [absTargetModule, exposed ?? appended], ...users];
   writeEdited(written);
   for (const [filePath, content] of written) {
     await client.notifyFileChanged(toFileUri(filePath), content);
@@ -542,6 +619,7 @@ export async function moveFunction({ client, workspaceRoot, absPath, absTargetMo
     "- Added function to target file",
     exposedAt !== -1 && (stays ? left : "- Updated source module's exposing list"),
     exposed && "- Updated target module's exposing list",
+    plan.targetImports.length > 0 && `- Imported ${plan.targetImports.join(", ")} in target module`,
     `- Updated imports in ${filesUpdated} other file(s).`,
   ]
     .filter(Boolean)

@@ -19,16 +19,6 @@ pub struct FieldInfo {
     pub definition: FieldDefinition,
 }
 
-/// Result of a move function operation
-#[derive(Debug)]
-pub struct MoveResult {
-    pub changes: HashMap<Url, Vec<TextEdit>>,
-    pub source_module: String,
-    pub target_module: String,
-    pub function_name: String,
-    pub references_updated: usize,
-}
-
 /// Result of a file rename/move operation
 #[derive(Debug)]
 pub struct FileOperationResult {
@@ -136,6 +126,41 @@ pub struct CaseExpressionInfo {
     pub insert_range: Option<Range>,
     /// The indentation to use for the new branch
     pub indentation: String,
+    /// The patterns of the branches that the case needs, none where a
+    /// catch-all takes the new variant already
+    pub patterns: Vec<BranchPattern>,
+}
+
+/// The pattern of a new branch, written around the new variant. In a case
+/// on a tuple it is "( Help, _ )", and in a case on a Maybe "Just Help".
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct BranchPattern {
+    /// What stands before the variant
+    pub before: String,
+    /// The qualifier that the other branches write the variants with, or none
+    pub qualifier: Option<String>,
+    /// What stands after the variant
+    pub after: String,
+    /// Whether the variant is the argument of another one, where it needs
+    /// brackets once it takes arguments of its own
+    pub in_argument: bool,
+}
+
+impl BranchPattern {
+    /// The pattern with the variant in it, and a wildcard for each of its arguments
+    pub fn with(&self, variant: &str, arity: usize) -> String {
+        let qualified = match &self.qualifier {
+            Some(qualifier) => format!("{}.{}", qualifier, variant),
+            None => variant.to_string(),
+        };
+        let applied = format!("{}{}", qualified, " _".repeat(arity));
+        let written = if self.in_argument && arity > 0 {
+            format!("({})", applied)
+        } else {
+            applied
+        };
+        format!("{}{}{}", self.before, written, self.after)
+    }
 }
 
 /// Result of preparing to add a variant
@@ -148,6 +173,10 @@ pub struct PrepareAddVariantResult {
     pub existing_variants: Vec<String>,
     pub case_expressions: Vec<CaseExpressionInfo>,
     pub cases_needing_branch: usize,
+    /// Each place where the compiler would ask for a branch that this tool
+    /// cannot write, with its module, line and code. elm_add_variant changes
+    /// nothing while there is one.
+    pub unhandled: Vec<String>,
 }
 
 impl PrepareAddVariantResult {
@@ -160,6 +189,7 @@ impl PrepareAddVariantResult {
             existing_variants: Vec::new(),
             case_expressions: Vec::new(),
             cases_needing_branch: 0,
+            unhandled: Vec::new(),
         }
     }
 }
@@ -268,7 +298,7 @@ impl AddVariantResult {
 // ============================================================================
 
 /// Type of field usage for removal classification
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
 pub enum FieldUsageType {
     /// Field in type definition: { name : String }
     Definition,
@@ -282,6 +312,8 @@ pub enum FieldUsageType {
     RecordPattern,
     /// Field in record update: { user | name = x }
     RecordUpdate,
+    /// A use of the variable that a record pattern binds: { name } -> name
+    PatternVariable,
 }
 
 /// Information about a field usage

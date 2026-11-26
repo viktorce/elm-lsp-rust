@@ -20,6 +20,7 @@ Fast Elm Language Server (Rust) for coding agents. **Not for text editors** - ag
 
 ```bash
 cargo build --release --locked
+cargo test --release --locked                                           # Rust unit tests
 (cd tests && npm ci --ignore-scripts)                                   # once per clone
 node tests/run_tests.mjs && node tests/test_meetdown_comprehensive.mjs  # tools and language server
 node --test tests/*.test.mjs                                            # MCP server, CLI, harness config, benchmark
@@ -30,11 +31,12 @@ The suites need `elm` 0.19.1 and `elm-format` on `PATH`, and Node.js 20.4 or new
 
 ## Key Files
 
-- `src/workspace/` - Core logic: indexing, references, rename, remove variant
+- `src/workspace/` - Core logic: indexing, name resolution in `resolve.rs`, references, rename, move function, add/remove variant, remove field
+- `src/field_inference.rs` - Whole-project type inference for field rename, field references and field removal
 - `src/server.rs` - LSP protocol handlers
-- `src/type_checker.rs` - Type inference for field rename
+- `src/type_checker.rs` - Tree storage and field definition lookup
 - `mcp-wrapper/tools.mjs` - Tool definitions, shared by the MCP server and the CLI
-- `mcp-wrapper/move-function.mjs` - `elm_move_function`, which moves the lines of a function and rewrites the imports that expose it
+- `mcp-wrapper/move-function.mjs` - `elm_move_function`, which moves the lines of a function and applies the server's move plan across imports and callers
 - `mcp-wrapper/index.mjs` - MCP server (stdio and HTTP)
 - `mcp-wrapper/cli.mjs` - Command-line interface
 - `mcp-wrapper/doctor.mjs` - The installation checks of `cli.mjs doctor`
