@@ -8,6 +8,7 @@ import { runAgent } from "./agent.mjs";
 import { scanProject } from "./elm-source.mjs";
 import { resumesAt, TOO_MUCH } from "./harness.mjs";
 import { Interrupted, isStopped } from "./process.mjs";
+import { problem } from "./problems.mjs";
 import {
   changedFiles,
   closeCheckout,
@@ -25,7 +26,7 @@ import {
   stateOf,
   takeAway,
 } from "./sandbox.mjs";
-import { unmetExpectations } from "./tasks.mjs";
+import { unmetProblems } from "./tasks.mjs";
 
 /**
  * How a run ended, from best to worst:
@@ -105,6 +106,9 @@ function wrongSetup(harness, arm, agent, version, ended = false) {
   return null;
 }
 
+// Problems as a record keeps them: the sentences, and beside them their kinds, which a reader of older records passes over
+const asRecorded = (found) => ({ problems: found.map(({ text }) => text), problemKinds: found.map(({ kind }) => kind) });
+
 /**
  * What the session left behind, judged. A session can leave the project in a
  * state that cannot even be read, and that is a result too, so nothing here
@@ -128,24 +132,22 @@ export async function judge(worktree, codebase, task, before) {
       originals: await originalsOf(worktree, changed, before),
       committed: await committedFiles(worktree),
     };
-    // One expectation at a time, so that each sentence keeps the kind of what it says does not hold
-    const unmet = task.expect.flatMap((expectation) =>
-      unmetExpectations(realRootOf(worktree), [expectation], left).map((problem) => ({ kind: expectation.kind, problem }))
-    );
-    const problems = [
-      ...(after.ok ? [] : [after.problem]),
-      ...unmet.map(({ problem }) => problem),
+    // One expectation at a time, so that each problem keeps the kind of the expectation it says does not hold
+    const unmet = task.expect.flatMap((expectation) => unmetProblems(realRootOf(worktree), [expectation], left).map((found) => ({ expectation: expectation.kind, found })));
+    const found = [
+      ...(after.ok ? [] : [{ text: after.problem, kind: after.kind }]),
+      ...unmet.map(({ found }) => found),
       // Its changes are judged all the same, since they are compared with the commit the session started from
-      ...((await isOnItsCommit(worktree)) ? [] : ["the session created a commit, which the task told it not to"]),
+      ...((await isOnItsCommit(worktree)) ? [] : [problem("commit")]),
     ];
     // The files of the project that changed. What a build wrote beside them, or a note, is in the patch and no change.
     const counted = changed.filter((file) => left.committed.has(file) || file.endsWith(".elm"));
-    return { compiles: after.ok, problems, unmet: unmet.map(({ kind }) => kind), checkMs: known.checkMs, changedFiles: counted.length, patch: left.patch };
+    return { compiles: after.ok, ...asRecorded(found), unmet: unmet.map(({ expectation }) => expectation), checkMs: known.checkMs, changedFiles: counted.length, patch: left.patch };
   } catch (error) {
     // Ended from outside, which says nothing about what the session left behind
     if (isStopped()) throw new Interrupted();
     // The first line says what failed. git can go on with its whole usage text.
-    return { ...known, problems: [`the result could not be judged: ${error.message.split("\n")[0]}`], changedFiles: null };
+    return { ...known, ...asRecorded([problem("not-judged", { error: error.message.split("\n")[0] })]), changedFiles: null };
   }
 }
 
@@ -242,7 +244,7 @@ export async function executeRun({ task, codebase, arm, repetition, options, aft
       throw new Error(`${id}: the session ${how} (${lastWords(agent)}). Nothing was recorded for it.${later}`);
     }
 
-    const { compiles, problems, changedFiles: changedCount, patch } = await judge(worktree, codebase, task, before);
+    const { compiles, problems, problemKinds, changedFiles: changedCount, patch } = await judge(worktree, codebase, task, before);
     // A signal that came while the result was judged may have cut the judging short
     if (isStopped()) throw new Interrupted();
     writeFileSync(patchPath, patch);
@@ -266,6 +268,7 @@ export async function executeRun({ task, codebase, arm, repetition, options, aft
       outcome,
       failure: outcome === "agent-failed" ? failureOf(agent) : null,
       problems,
+      problemKinds,
       changedFiles: changedCount,
       ...agent,
     };

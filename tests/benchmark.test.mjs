@@ -1085,14 +1085,14 @@ test("a check command that runs out of time is ended with everything it started"
   const codebase = { check: [process.execPath, "-e", script], checkTimeoutMs: 300 };
 
   const started = Date.now();
-  assert.deepEqual(await runCheck({ elmRoot }, codebase), { ok: false, timedOut: true, problem: "the check command ran out of time" });
+  assert.deepEqual(await runCheck({ elmRoot }, codebase), { ok: false, timedOut: true, problem: "the check command ran out of time", kind: "check-timed-out" });
   assert.ok(Date.now() - started < 5000);
   await sleep(1500);
   assert.equal(existsSync(join(elmRoot, "built")), false, "a process of the check command outlived it");
 
   // A build script that cleans up when it is told to end, and exits as one that succeeded
   const polite = `process.on("SIGTERM", () => process.exit(0)); setInterval(() => {}, 1000);`;
-  assert.deepEqual(await runCheck({ elmRoot }, { check: [process.execPath, "-e", polite], checkTimeoutMs: 300 }), { ok: false, timedOut: true, problem: "the check command ran out of time" });
+  assert.deepEqual(await runCheck({ elmRoot }, { check: [process.execPath, "-e", polite], checkTimeoutMs: 300 }), { ok: false, timedOut: true, problem: "the check command ran out of time", kind: "check-timed-out" });
   // And one that is done in time
   assert.deepEqual(await runCheck({ elmRoot }, { check: [process.execPath, "-e", ""], checkTimeoutMs: 30000 }), { ok: true, timedOut: false, problem: "" });
 });
@@ -1673,7 +1673,11 @@ test("plan, run and report work end to end on a throwaway repository", async (t)
     "src/TypesRenamed.elm does not declare the module TypesRenamed",
     "Types is still imported by src/Main.elm, src/Utils.elm",
   ]);
+  // Beside each sentence, its kind, which a report reads instead of the words
+  assert.deepEqual(records["Fixture--rename-module--100--baseline--1"].problemKinds, ["old-name-left", "change-missing", "old-name-left"]);
+  assert.deepEqual(lspRename.problemKinds, []);
   assert.match(records["Fixture--add-variant--100--lsp--1"].problems[0], /^the check command fails: SYNTAX PROBLEM/);
+  assert.equal(records["Fixture--add-variant--100--lsp--1"].problemKinds[0], "does-not-compile");
   assert.ok(existsSync(join(out, "runs", "Fixture--rename-function--100--lsp--1.jsonl")), "the transcript is kept");
   // Both arms were started with the same built-in tools, and one of them with the language server's besides
   const toolsOf = (arm) => JSON.parse(readFileSync(join(out, "runs", `Fixture--rename-function--100--${arm}--1.jsonl`), "utf-8").split("\n")[0]).tools;

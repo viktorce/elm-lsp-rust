@@ -30,6 +30,7 @@ import {
   withVariant,
 } from "./elm-source.mjs";
 import { moveCandidates, movedFiles, movePairs } from "./move.mjs";
+import { difference, problem, tokenDifference } from "./problems.mjs";
 import { fieldCandidates, removalTrial, removedFrom, variantCandidates, withoutTodoMessages } from "./remove.mjs";
 
 // Suffix of every new name. A target whose new name stands in the project's code already is left
@@ -663,7 +664,8 @@ const NAMED_IN_HEADER = {
  * What a text holds beyond the rename of `from` to `to`, compared with what
  * it was: null when every token is the one that was there, or `to` in the
  * place of `from`. Layout and comments are free. Anything else, a changed
- * string literal for one, comes back as a few words on the first difference.
+ * string literal for one, comes back as a few words on the first difference,
+ * with the id of the words, which decides the kind of the problem.
  * A text replace that also reached into a string would otherwise pass, as
  * long as the project still compiles.
  *
@@ -686,7 +688,7 @@ function beyondRename(before, after, { of, from, to }, normal = (tokens) => toke
     const [old, now] = [wasBody[at], isBody[at]];
     const renamed = old === from && now === to && (of === "module" ? isBody[at + 1] === "." : of !== "type" || isBody[at + 1] !== ".");
     if (old !== now && !renamed) {
-      return `${old ?? "the end of the file"} became ${now ?? "the end of the file"}`;
+      return tokenDifference(old ?? "the end of the file", now ?? "the end of the file");
     }
   }
   // The module line and the imports may come in another order, and so may what each of them
@@ -708,55 +710,55 @@ function beyondRename(before, after, { of, from, to }, normal = (tokens) => toke
   };
   const [had, has] = [lines(was.header), lines(is.header)];
   const [lost, gained] = [missing(had, has), missing(has, had)];
-  if (lost !== undefined) return `the module line and the imports no longer have "${lost}"`;
-  return gained === undefined ? null : `the module line and the imports gained "${gained}"`;
+  if (lost !== undefined) return difference("header-lost", { line: lost });
+  return gained === undefined ? null : difference("header-gained", { line: gained });
 }
 
-// Each check returns null when the expectation holds, or a sentence that says what is wrong.
+// Each check returns null when the expectation holds, or a problem: a sentence that says what is wrong, with its kind.
 const CHECKS = {
-  "declares-function": ({ file, name }, { elmRoot }) => (declares(elmRoot, file, name) ? null : `${file} does not declare ${name}`),
+  "declares-function": ({ file, name }, { elmRoot }) => (declares(elmRoot, file, name) ? null : problem("lacks-function-declaration", { file, name })),
 
-  "lacks-function": ({ file, name }, { elmRoot }) => (declares(elmRoot, file, name) ? `${file} still declares ${name}` : null),
+  "lacks-function": ({ file, name }, { elmRoot }) => (declares(elmRoot, file, name) ? problem("still-declares-function", { file, name }) : null),
 
   "functions-kept": ({ name, files }, { elmRoot }) => {
     const lost = files.filter((file) => !declares(elmRoot, file, name));
-    return lost.length > 0 ? `${name} was also renamed or removed in ${lost.join(", ")}` : null;
+    return lost.length > 0 ? problem("function-namesake-lost", { name, files: lost.join(", ") }) : null;
   },
 
   // With `last`, the variant also has to be the last one of its type
   "type-has-variant": ({ file, type, variant, last }, { elmRoot }) => {
     const variants = variantsOf(elmRoot, file, type);
-    if (!variants.includes(variant)) return `${type} in ${file} has no variant ${variant}`;
-    return last && variants.at(-1) !== variant ? `${variant} is not the last variant of ${type} in ${file}` : null;
+    if (!variants.includes(variant)) return problem("lacks-variant", { type, file, variant });
+    return last && variants.at(-1) !== variant ? problem("variant-not-last", { variant, type, file }) : null;
   },
 
   "type-lacks-variant": ({ file, type, variant }, { elmRoot }) =>
-    variantsOf(elmRoot, file, type).includes(variant) ? `${type} in ${file} still has the variant ${variant}` : null,
+    variantsOf(elmRoot, file, type).includes(variant) ? problem("still-has-variant", { type, file, variant }) : null,
 
   "variants-kept": ({ variant, types }, { elmRoot }) => {
     const lost = types.filter(({ file, type }) => !variantsOf(elmRoot, file, type).includes(variant));
-    return lost.length > 0 ? `${variant} was also renamed or removed on ${lost.map((l) => `${l.type} (${l.file})`).join(", ")}` : null;
+    return lost.length > 0 ? problem("variant-namesake-lost", { variant, types: lost.map((l) => `${l.type} (${l.file})`).join(", ") }) : null;
   },
 
-  "declares-type": ({ file, name }, { elmRoot }) => (scan(elmRoot, file)?.typeNames.includes(name) ? null : `${file} does not declare the type ${name}`),
+  "declares-type": ({ file, name }, { elmRoot }) => (scan(elmRoot, file)?.typeNames.includes(name) ? null : problem("lacks-type-declaration", { file, name })),
 
-  "lacks-type": ({ file, name }, { elmRoot }) => (scan(elmRoot, file)?.typeNames.includes(name) ? `${file} still declares the type ${name}` : null),
+  "lacks-type": ({ file, name }, { elmRoot }) => (scan(elmRoot, file)?.typeNames.includes(name) ? problem("still-declares-type", { file, name }) : null),
 
   // A type or a type alias of another module, or one called like a variant, is another thing and keeps its name
   "types-kept": ({ name, files }, { elmRoot }) => {
     const lost = files.filter((file) => !scan(elmRoot, file)?.typeNames.includes(name));
-    return lost.length > 0 ? `the type ${name} was also renamed or removed in ${lost.join(", ")}` : null;
+    return lost.length > 0 ? problem("type-namesake-lost", { name, files: lost.join(", ") }) : null;
   },
 
   "alias-has-field": ({ file, alias, field }, { elmRoot }) =>
-    fieldsOf(elmRoot, file, alias).includes(field) ? null : `${alias} in ${file} has no field ${field}`,
+    fieldsOf(elmRoot, file, alias).includes(field) ? null : problem("lacks-field", { alias, file, field }),
 
   "alias-lacks-field": ({ file, alias, field }, { elmRoot }) =>
-    fieldsOf(elmRoot, file, alias).includes(field) ? `${alias} in ${file} still has the field ${field}` : null,
+    fieldsOf(elmRoot, file, alias).includes(field) ? problem("still-has-field", { alias, file, field }) : null,
 
   "fields-kept": ({ field, aliases }, { elmRoot }) => {
     const lost = aliases.filter(({ file, alias }) => !fieldsOf(elmRoot, file, alias).includes(field));
-    return lost.length > 0 ? `${field} was also renamed or removed on ${lost.map((l) => `${l.alias} (${l.file})`).join(", ")}` : null;
+    return lost.length > 0 ? problem("field-namesake-lost", { field, aliases: lost.map((l) => `${l.alias} (${l.file})`).join(", ") }) : null;
   },
 
   // In every file that changed, nothing changed but the name. `moved` names a file that went to another
@@ -767,14 +769,14 @@ const CHECKS = {
     for (const file of changed.filter((path) => path.endsWith(".elm") && path !== movedFrom)) {
       const before = originals.get(file === movedTo ? movedFrom : file) ?? null;
       const after = read(elmRoot, file);
-      if (after === null) return `${file} was deleted, which no rename asks for`;
-      if (file === movedTo && committed.has(file)) return `the move of ${movedFrom} wrote over ${file}, a file of the starting commit`;
+      if (after === null) return problem("file-deleted", { file, change: "rename" });
+      if (file === movedTo && committed.has(file)) return problem("move-wrote-over", { from: movedFrom, file });
       // The module that moved is compared with what it was at its old place. With the old
       // file still there and untouched, another expectation says so.
       if (before === null && file === movedTo) continue;
-      if (before === null) return `${file} is a new file, which no rename asks for`;
+      if (before === null) return problem("file-new", { file, change: "rename" });
       const beyond = beyondRename(before, after, rename);
-      if (beyond) return `${file} changed in more than the name: ${beyond}`;
+      if (beyond) return problem("renamed-beyond", { file, difference: beyond });
     }
     return null;
   },
@@ -784,11 +786,11 @@ const CHECKS = {
   "moves-function": (move, { elmRoot, changed, originals }) => {
     const original = (file) => (originals.has(file) ? originals.get(file) : read(elmRoot, file));
     for (const file of changed.filter((path) => [move.from, move.to, ...move.users].includes(path))) {
-      if (read(elmRoot, file) === null) return `${file} was deleted, which no move asks for`;
-      if (original(file) === null) return `${file} is a new file, which no move asks for`;
+      if (read(elmRoot, file) === null) return problem("file-deleted", { file, change: "move" });
+      if (original(file) === null) return problem("file-new", { file, change: "move" });
       for (const { expected, found, part } of movePairs(move, file, original, (path) => read(elmRoot, path))) {
         const beyond = beyondRename(expected, found, { of: "function" });
-        if (beyond) return part === "function" ? `${move.name} in ${file} is not the function that was moved: ${beyond}` : `${file} changed in more than the move: ${beyond}`;
+        if (beyond) return part === "function" ? problem("moved-function-differs", { name: move.name, file, difference: beyond }) : problem("moved-beyond", { file, difference: beyond });
       }
     }
     return null;
@@ -800,25 +802,25 @@ const CHECKS = {
     const original = (file) => (originals.has(file) ? originals.get(file) : read(elmRoot, file));
     for (const file of new Set([...removal.users, ...changed.filter((path) => path.endsWith(".elm"))])) {
       const [was, is] = [original(file), read(elmRoot, file)];
-      if (is === null) return `${file} was deleted, which no removal asks for`;
-      if (was === null) return `${file} is a new file, which no removal asks for`;
+      if (is === null) return problem("file-deleted", { file, change: "removal" });
+      if (was === null) return problem("file-new", { file, change: "removal" });
       // The plan read the same text when it built the removal, so this reading cannot fail unless the starting commit changed
       const expected = removal.users.includes(file) ? removedFrom(removal, file, was) : was;
-      if (expected === null) return `${file} cannot be read as the plan read it, so the removal cannot be judged`;
+      if (expected === null) return problem("removal-unreadable", { file });
       const beyond = beyondRename(expected, is, { of: removal.of }, withoutTodoMessages);
-      if (beyond) return `${file} is not what the removal makes of it: ${beyond}`;
+      if (beyond) return problem("removal-differs", { file, difference: beyond });
     }
     return null;
   },
 
-  "file-missing": ({ file }, { elmRoot }) => (existsSync(join(elmRoot, file)) ? `${file} still exists` : null),
+  "file-missing": ({ file }, { elmRoot }) => (existsSync(join(elmRoot, file)) ? problem("file-still-exists", { file }) : null),
 
   "declares-module": ({ file, module }, { elmRoot }) =>
-    scan(elmRoot, file)?.module === module ? null : `${file} does not declare the module ${module}`,
+    scan(elmRoot, file)?.module === module ? null : problem("lacks-module-declaration", { file, module }),
 
   "no-import-of": ({ module }, { elmRoot }) => {
     const importers = filesOf(importersOf(scanProject(elmRoot), module));
-    return importers.length > 0 ? `${module} is still imported by ${importers.join(", ")}` : null;
+    return importers.length > 0 ? problem("still-imported", { module, files: importers.join(", ") }) : null;
   },
 
   // The request was to add the variant, a branch for it wherever the compiler asks, and nothing else.
@@ -851,7 +853,7 @@ const CHECKS = {
       if ((first ?? "call") !== "call" || more.length > 0) return null;
       return second === "message" && depth === 0 ? "whole" : "begun";
     };
-    const noBody = `a branch for ${variant} is followed by something else than a Debug.todo with a message`;
+    const noBody = problem("branch-not-todo", { variant });
     // The line that adds the variant to its type: a bar, any blanks and the variant, as in "| Dot" or "|Dot"
     const addsVariant = (line) => line.startsWith("|") && line.slice(1).trim() === variant;
     // What stands behind the arrow of a branch for the variant, or null for any other line. The
@@ -905,7 +907,7 @@ const CHECKS = {
         // line of code below a body has to begin a branch of its own or end the case, or the branch took
         // that line over from the one above, which loses it.
         if (state === "whole" && below > indent) {
-          return `a branch for ${variant} takes over the line below it, which is indented deeper than the branch's pattern`;
+          return problem("branch-takes-line", { variant });
         }
         if (state === "whole") body = null;
       }
@@ -915,14 +917,15 @@ const CHECKS = {
       unfinished ||= body !== null;
     }
     if (removed.length > 0 || stray.length > 0) {
-      return `changed more than the variant and its branches: ${[...removed.map((line) => `-${line}`), ...stray.map((line) => `+${line || "<blank line in a literal>"}`)].slice(0, 5).join(" / ")}`;
+      const lines = [...removed.map((line) => `-${line}`), ...stray.map((line) => `+${line || "<blank line in a literal>"}`)];
+      return problem("beyond-branches", { lines: lines.slice(0, 5).join(" / ") });
     }
     // Another expectation finds the variant on the type that was named. A second one went onto
     // another type, a namesake in another module for one, where it compiles just as well.
     const variants = added.filter(addsVariant).length;
-    if (variants > 1) return `${variant} was added ${variants} times, and one type was to get it`;
+    if (variants > 1) return problem("variant-twice", { variant, times: variants });
     if (unfinished) return noBody;
-    return branches > 0 ? null : `no branch for ${variant} was added`;
+    return branches > 0 ? null : problem("no-branch", { variant });
   },
 
   // A refactoring of Elm code changes Elm files of the project. Of what the commit holds, a data
@@ -933,7 +936,7 @@ const CHECKS = {
   "only-elm-files": ({ except = [] }, { changed, committed }) => {
     const isBeside = (file) => file === ".." || file.startsWith("../");
     const stray = changed.filter((file) => committed.has(file) && (isBeside(file) || !file.endsWith(".elm")) && !except.includes(file));
-    return stray.length > 0 ? `changed files that are no Elm sources of the project: ${stray.join(", ")}` : null;
+    return stray.length > 0 ? problem("non-elm-files", { files: stray.join(", ") }) : null;
   },
 
   // A package lists the modules it exposes in elm.json, where the renamed one takes its new
@@ -951,11 +954,11 @@ const CHECKS = {
       const was = changed.includes("elm.json") ? JSON.parse(originals.get("elm.json")) : now;
       const expected = "exposed-modules" in was ? { ...was, "exposed-modules": renamed(was["exposed-modules"]) } : was;
       if (isDeepStrictEqual(now, expected)) return null;
-      if (isDeepStrictEqual(now, was)) return `elm.json still lists ${from} among the modules it exposes`;
+      if (isDeepStrictEqual(now, was)) return problem("elm-json-still-lists", { from });
     } catch {
       // Gone, or no JSON any more
     }
-    return `elm.json changed in more than the name of ${from} among the modules it exposes`;
+    return problem("elm-json-beyond", { from });
   },
 
   // A file that cannot use the target can still name it in a comment, which a search and replace
@@ -967,7 +970,7 @@ const CHECKS = {
       return before !== null && after !== null && beyondRename(before, after, { of: "function" }) === null;
     };
     const stray = changed.filter((file) => file.endsWith(".elm") && !allowed.has(file) && !sameCode(file));
-    return stray.length > 0 ? `changed files that cannot use the target: ${stray.join(", ")}` : null;
+    return stray.length > 0 ? problem("cannot-use-target", { files: stray.join(", ") }) : null;
   },
 };
 
@@ -1098,5 +1101,10 @@ function changedLines(patch, elmRoot, patchRoot, originals) {
  * @returns {string[]} one sentence per expectation that does not hold
  */
 export function unmetExpectations(elmRoot, expect, left) {
+  return unmetProblems(elmRoot, expect, left).map(({ text }) => text);
+}
+
+/** The same as unmetExpectations, with the kind of each problem beside its sentence, as a record keeps them. */
+export function unmetProblems(elmRoot, expect, left) {
   return expect.map((expectation) => CHECKS[expectation.kind](expectation, { elmRoot, ...left })).filter(Boolean);
 }

@@ -151,13 +151,18 @@ export function summarizeTranscript(events, given = BUILT_IN_TOOLS, arm) {
     turns: result?.num_turns ?? null,
     // Every input token counts, the ones written to the cache and the ones read from it among them. The arms have
     // different tools and so a cached prompt each, and whether a session finds its arm's still there depends on
-    // how long the other arm's sessions took since one of its own ran.
-    ...tokens({
-      input: (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0),
-      cacheWrite: usage.cache_creation_input_tokens,
-      cacheRead: usage.cache_read_input_tokens,
-      output: usage.output_tokens,
-    }),
+    // how long the other arm's sessions took since one of its own ran. Claude Code counts them in the result
+    // event, as it does the cost, so a session killed before that event has neither.
+    ...tokens(
+      result === undefined
+        ? null
+        : {
+            input: (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0),
+            cacheWrite: usage.cache_creation_input_tokens,
+            cacheRead: usage.cache_read_input_tokens,
+            output: usage.output_tokens,
+          }
+    ),
     toolCalls,
     lspCalls,
   };

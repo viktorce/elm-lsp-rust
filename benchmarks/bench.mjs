@@ -17,6 +17,7 @@ import { DEFAULT_LEVELS } from "./lib/levels.mjs";
 import { planCodebase, shortfallLines } from "./lib/plan.mjs";
 import { runProbe } from "./lib/probe.mjs";
 import { assertProcessesVisible, Interrupted, isStopped, LONGEST_TIMEOUT_MS, stopAll } from "./lib/process.mjs";
+import { assertComparable, checkedNotes, compareRuns, renderComparison } from "./lib/compare.mjs";
 import { renderReport, summarize } from "./lib/report.mjs";
 import { plural, TASK_TYPES, triedTargets } from "./lib/tasks.mjs";
 import { executeRun, runId } from "./lib/run.mjs";
@@ -27,6 +28,8 @@ const USAGE = `Usage: node benchmarks/bench.mjs <command> --out <dir> [options]
   plan     Pick one target per task type and level in each codebase and write <out>/plan.json
   run      Run every planned task in every arm and write one record per session to <out>/runs/
   report   Summarize the records into <out>/report.html and <out>/summary.json
+  compare  Put several runs side by side from their records, and write <out>/comparison.html
+           and <out>/comparison.json: compare --out <dir> <run directory>...
   entries  Print a check command for each codebase that also compiles the modules nothing imports
   probe    Call the language server's tools on many targets of each task type, with no agent,
            and write the verdicts to <out>/probe/ and their counts to <out>/probe.json
@@ -52,6 +55,7 @@ Options
   --max-tokens <n>       Limit of tokens per session, where the harness counts them as a session goes (run, default none)
   --timeout-min <n>      Time limit per session (run, default 20)
   --agent <path>         The harness's executable (run, default ${Object.values(HARNESSES).map((harness) => harness.executable).join(", ")})
+  --notes <file>         A JSON file that maps a run's name, or its model's id, to paragraphs about it (compare)
 
 A run that stops, or is stopped with Ctrl-C, goes on from its last finished
 session when the same command is given again. So does a probe, from its last
@@ -61,10 +65,16 @@ class UsageError extends Error {}
 
 // Turn ["--out", "dir", "--repeat", "2"] into { out: "dir", repeat: "2" }.
 // `known` lists the options the command takes. Any other one is a mistake.
-function parseOptions(argv, known) {
-  const options = {};
+// A command that takes `paths` gets every other word, before its options or after them, in `paths`.
+function parseOptions(argv, known, paths = false) {
+  const options = paths ? { paths: [] } : {};
   for (let i = 0; i < argv.length; i += 2) {
     const name = argv[i].replace(/^--/, "");
+    if (paths && !argv[i].startsWith("--")) {
+      options.paths.push(argv[i]);
+      i -= 1;
+      continue;
+    }
     if (!argv[i].startsWith("--") || argv[i + 1] === undefined) {
       throw new UsageError(`Expected --<option> <value>, got "${argv.slice(i, i + 2).join(" ")}"`);
     }
@@ -578,16 +588,21 @@ async function run(options) {
   if (failure) throw failure;
 }
 
-function report(options) {
-  const out = resolve(required(options, "out"));
+// The plan of the run in `out`, the summary of its records and its settings, which its report and a comparison draw on
+function summaryOf(out) {
   const runsDir = join(out, "runs");
   const records = readRecords(runsDir);
   if (records.length === 0) throw new Error(`No run records in ${runsDir}. Run the run command first.`);
-
   // Written by "run". Records that were made before it existed speak for themselves.
   const settingsPath = join(out, "run.json");
-  const arms = existsSync(settingsPath) ? readJson(settingsPath).arms : undefined;
-  const summary = summarize(readPlan(out), records, arms);
+  const settings = existsSync(settingsPath) ? readJson(settingsPath) : null;
+  const plan = readPlan(out);
+  return { plan, summary: summarize(plan, records, settings?.arms), settings };
+}
+
+function report(options) {
+  const out = resolve(required(options, "out"));
+  const { summary } = summaryOf(out);
   writeJson(join(out, "summary.json"), summary);
   writeFileSync(join(out, "report.html"), renderReport(summary));
   if (summary.unpaired > 0) {
@@ -595,6 +610,21 @@ function report(options) {
     console.log(`${left} left out of the report: the other arm has not done the same round of the same task yet`);
   }
   console.log(`Wrote ${join(out, "report.html")}`);
+}
+
+// Reads the records of each run and starts nothing, so it can run beside a run that is under way
+function compare(options) {
+  const out = resolve(required(options, "out"));
+  if (options.paths.length === 0) throw new UsageError("compare needs the directory of at least one run");
+  const runs = options.paths.map((dir) => ({ dir, ...summaryOf(resolve(dir)) }));
+  assertComparable(runs);
+  const summaries = runs.map(({ summary }) => summary);
+  const notes = options.notes === undefined ? {} : checkedNotes(readJson(resolve(options.notes)), summaries);
+  const comparison = compareRuns(runs);
+  mkdirSync(out, { recursive: true });
+  writeJson(join(out, "comparison.json"), comparison);
+  writeFileSync(join(out, "comparison.html"), renderComparison(comparison, summaries, notes));
+  console.log(`Wrote ${join(out, "comparison.html")}`);
 }
 
 async function probe(options) {
@@ -615,6 +645,7 @@ const COMMANDS = {
     interrupted: "Finished sessions keep their records, and the same command picks up from there.",
   },
   report: { run: report, options: ["out"], interrupted: "" },
+  compare: { run: compare, options: ["out", "notes"], paths: true, interrupted: "" },
   entries: { run: entries, options: ["out", "config"], interrupted: "" },
   probe: {
     run: probe,
@@ -632,7 +663,7 @@ async function main([command, ...rest]) {
   // A hook, or a command that "git rebase -x" runs, is told by git where its repository is. Every
   // git command below would follow that, the benchmark's own and a session's, into that repository.
   const place = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"].find((name) => process.env[name] !== undefined);
-  if (place && command !== "report") {
+  if (place && !["report", "compare"].includes(command)) {
     throw new Error(`${place} is set, so git would work in the repository it names and not in the codebases of the config. Unset it and run again.`);
   }
   // Ctrl-C, a kill and a closed terminal end the check commands and the sessions under way, each
@@ -655,7 +686,7 @@ async function main([command, ...rest]) {
     process.exitCode = 1;
     stopAll();
   });
-  await COMMANDS[command].run(parseOptions(rest, COMMANDS[command].options));
+  await COMMANDS[command].run(parseOptions(rest, COMMANDS[command].options, COMMANDS[command].paths));
 }
 
 main(process.argv.slice(2)).catch((error) => {

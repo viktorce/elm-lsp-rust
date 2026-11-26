@@ -85,6 +85,11 @@ test("a transcript is condensed into the session's figures", () => {
   assert.equal(killed.stopReason, "no result");
   assert.equal(killed.lspStatus, "absent");
   assert.equal(killed.costUsd, null);
+  // Nor any tokens, which Claude Code counts in the same event as the cost
+  assert.deepEqual(
+    [killed.inputTokens, killed.cacheCreationInputTokens, killed.cacheReadInputTokens, killed.outputTokens],
+    [null, null, null, null]
+  );
 
   // Claude Code was asking the API again when the session ended, at the first request or a later one.
   // An answer that came after all ends the wait.

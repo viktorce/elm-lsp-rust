@@ -7,7 +7,10 @@
  */
 
 import { ARMS } from "./arms.mjs";
+import { LSP_PREFIX, tokens } from "./harness.mjs";
 import { harnessIdOf, harnessOf } from "./harnesses/index.mjs";
+import { firstProblemKind, PROBLEM_KINDS } from "./problems.mjs";
+import { DRAWS, MIN_TASKS, savedInterval, savedPercent, signTest } from "./stats.mjs";
 import { plural, TASK_TYPES } from "./tasks.mjs";
 
 function median(values) {
@@ -22,11 +25,14 @@ const totalToolCalls = (record) => Object.values(record.toolCalls).reduce((total
 // The ways a session can end, best first. A failed session is told apart by what stopped it:
 // the limits are the operator's and say something about the arm, an error says little. A limit
 // of money holds a harness that reports a cost, and one of tokens a harness that counts them as a
-// session goes.
+// session goes. A result that the check could not read is a wrong one or one that does not compile
+// in its record. It ends as one that could not be judged, under the name its failure has, and only
+// a run that has such a session counts that ending.
 const ENDINGS = [
   { id: "passed", title: "Solved" },
   { id: "wrong-result", title: "Wrong result" },
   { id: "does-not-compile", title: "Does not compile" },
+  { id: "not-judged", title: PROBLEM_KINDS.find(({ id }) => id === "not-judged").title, seen: true },
   { id: "time-limit", title: "Out of time" },
   { id: "budget-limit", title: "Out of budget", limit: "reportsCost" },
   { id: "token-limit", title: "Out of tokens", limit: "countsTokens" },
@@ -35,7 +41,8 @@ const ENDINGS = [
 ];
 
 // The endings that the sessions of a harness can come to: a limit only where the harness can be held to it
-const endingsOf = (harness) => ENDINGS.filter(({ limit }) => limit === undefined || harness[limit]);
+const endingsOf = (harness, records) =>
+  ENDINGS.filter(({ id, limit, seen }) => (limit === undefined || harness[limit]) && (!seen || records.some((record) => endingOf(record) === id)));
 
 // The endings that a summary counts, as the harness of its sessions has them
 const endingsIn = (summary) => ENDINGS.filter(({ id }) => id in summary.overall[summary.arms[0].id].endings);
@@ -43,18 +50,30 @@ const endingsIn = (summary) => ENDINGS.filter(({ id }) => id in summary.overall[
 // Tokens in place of a cost, for the sessions of a harness that reports none
 const TOKENS = ["inputTokens", "cacheReadInputTokens", "outputTokens"];
 
-const endingOf = (record) => (record.outcome === "agent-failed" ? record.failure : record.outcome);
+// A harness that reports a cost counts a session's tokens in the same event, so a session without a cost
+// has no tokens either. A record of Claude Code made before its harness said so holds zeros in their place.
+const asCounted = (record, harness) => (harness.reportsCost && record.costUsd === null ? { ...record, ...tokens(null) } : record);
+
+const endingOf = (record) =>
+  record.outcome === "agent-failed"
+    ? record.failure
+    : ["wrong-result", "does-not-compile"].includes(record.outcome) && firstProblemKind(record) === "not-judged"
+      ? "not-judged"
+      : record.outcome;
 
 // A record of a run made before plans had levels has none
 const levelOf = (record) => record.level ?? null;
 
+export const isSolved = (record) => record.outcome === "passed";
+
 // The figures of a group of runs. Medians cover every session of the group that has the figure, solved or not.
-function measure(records, harness) {
+// `endings` are those that the run counts.
+function measure(records, harness, endings) {
   const costReported = harness.reportsCost;
   return {
     sessions: records.length,
-    solved: records.filter((record) => record.outcome === "passed").length,
-    endings: Object.fromEntries(endingsOf(harness).map(({ id }) => [id, records.filter((record) => endingOf(record) === id).length])),
+    solved: records.filter(isSolved).length,
+    endings: Object.fromEntries(endings.map(({ id }) => [id, records.filter((record) => endingOf(record) === id).length])),
     // A session that was killed reports no cost
     withoutCost: records.filter((record) => record.costUsd === null).length,
     costUsd: median(records.map((record) => record.costUsd)),
@@ -69,6 +88,195 @@ function measure(records, harness) {
     turns: median(records.map((record) => record.turns)),
     toolCalls: median(records.map(totalToolCalls)),
   };
+}
+
+const mean = (values) => {
+  const known = values.filter((value) => value !== null && value !== undefined);
+  return known.length === 0 ? null : known.reduce((total, value) => total + value, 0) / known.length;
+};
+
+const meanAndMedian = (values) => ({ mean: mean(values), median: median(values.map((value) => value ?? null)) });
+
+// A round of a task: the session of each arm on it with the same repetition
+const roundOf = (record) => `${record.task} #${record.repetition}`;
+
+// The figures that the server can save, by their names in a record. Each pair that lacks one is left out of it.
+export const SAVED = ["wallMs", "costUsd", "inputTokens", "outputTokens"];
+
+// The rounds that both arms did, each with the session of each arm
+function pairsOf(records) {
+  const withServer = new Map(records.filter((record) => record.arm === "lsp").map((record) => [roundOf(record), record]));
+  return records
+    .filter((record) => record.arm === "baseline" && withServer.has(roundOf(record)))
+    .map((baseline) => ({ task: baseline.task, baseline, lsp: withServer.get(roundOf(baseline)) }));
+}
+
+// One figure summed over the pairs that have it in both arms, and how much less the lsp arm took
+function saved(pairs, figure, withInterval) {
+  const counted = pairs.filter((pair) => (pair.baseline[figure] ?? null) !== null && (pair.lsp[figure] ?? null) !== null);
+  const sum = (subset, arm) => subset.reduce((total, pair) => total + pair[arm][figure], 0);
+  const [baseline, lsp] = [sum(counted, "baseline"), sum(counted, "lsp")];
+  const figures = { pairs: counted.length, baseline, lsp, savedPercent: savedPercent(baseline, lsp) };
+  if (!withInterval) return figures;
+  // The repetitions of a task are drawn together. In the order of the tasks' ids, so the order of the records does not matter.
+  const tasks = [...new Set(counted.map((pair) => pair.task))].sort().map((task) => {
+    const ofTask = counted.filter((pair) => pair.task === task);
+    return [sum(ofTask, "baseline"), sum(ofTask, "lsp")];
+  });
+  return { ...figures, tasks: tasks.length, interval: savedInterval(tasks) };
+}
+
+/**
+ * Per task, how many of the rounds each side solved. A pair holds the session
+ * of each side on the same round of `task`.
+ * @param {{ task: string, first: object, second: object }[]} pairs
+ */
+export function solvedByTask(pairs) {
+  const tasks = new Map();
+  for (const { task, first, second } of pairs) {
+    const [one, other] = tasks.get(task) ?? [0, 0];
+    tasks.set(task, [one + isSolved(first), other + isSolved(second)]);
+  }
+  return [...tasks.values()];
+}
+
+/**
+ * What the lsp arm saved against the baseline on the same rounds: time, cost
+ * where the harness reports one, and tokens. And which arm solved each task
+ * more often, with the sign test on that. Only the whole run gets intervals,
+ * since a handful of tasks carries a task type.
+ */
+function savingsOf(records, costReported, withInterval) {
+  const pairs = pairsOf(records);
+  const count = (holds) => pairs.filter((pair) => holds(isSolved(pair.baseline), isSolved(pair.lsp))).length;
+  const { firstMore, secondMore, tied, signP } = signTest(solvedByTask(pairs.map(({ task, baseline, lsp }) => ({ task, first: baseline, second: lsp }))));
+  return {
+    pairs: pairs.length,
+    ...Object.fromEntries(SAVED.map((figure) => [figure, figure === "costUsd" && !costReported ? null : saved(pairs, figure, withInterval)])),
+    solved: {
+      // Sessions, with each repetition of a task beside the repetition of the same number in the other arm
+      both: count((without, withIt) => without && withIt),
+      baselineOnly: count((without, withIt) => without && !withIt),
+      lspOnly: count((without, withIt) => !without && withIt),
+      neither: count((without, withIt) => !without && !withIt),
+      // Tasks, each for the arm that solved more of its rounds, which no numbering of the repetitions changes
+      tasks: { baselineMore: firstMore, lspMore: secondMore, tied },
+      signP,
+    },
+  };
+}
+
+// Names in the order of their code points, which is the same on every machine, where the order of a locale is not
+const byName = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
+// All of the server's tools count as one in what a session did, under this name
+const SERVER_TOOLS = "language server";
+
+const toolOf = (name) => (name.startsWith(LSP_PREFIX) ? SERVER_TOOLS : name);
+
+// A session called the server where the server answered a call. A call that the harness reports as failed was only tried.
+const calledServer = (record) => record.lspCalls > 0;
+
+// The calls of a group of sessions to each tool, the server's as one, in the order of `tools`
+function toolCallsOf(records, tools) {
+  const calls = Object.fromEntries(tools.map((tool) => [tool, 0]));
+  for (const record of records) {
+    for (const [name, count] of Object.entries(record.toolCalls)) calls[toolOf(name)] += count;
+  }
+  return tools.map((tool) => ({ tool, calls: calls[tool], perSession: records.length === 0 ? null : calls[tool] / records.length }));
+}
+
+// What the sessions of each arm did, in means and medians per session
+function activityOf(records, armIds) {
+  // The server first, then the harness's own tools by how often the run called them
+  const totals = {};
+  for (const record of records) {
+    for (const [name, count] of Object.entries(record.toolCalls)) totals[toolOf(name)] = (totals[toolOf(name)] ?? 0) + count;
+  }
+  const tools = [SERVER_TOOLS, ...Object.keys(totals).filter((tool) => tool !== SERVER_TOOLS).sort((a, b) => totals[b] - totals[a] || byName(a, b))];
+  return Object.fromEntries(
+    armIds.map((arm) => {
+      const ofArm = records.filter((record) => record.arm === arm);
+      return [
+        arm,
+        {
+          sessions: ofArm.length,
+          toolCalls: meanAndMedian(ofArm.map(totalToolCalls)),
+          replies: meanAndMedian(ofArm.map((record) => record.replies)),
+          outputTokens: meanAndMedian(ofArm.map((record) => record.outputTokens)),
+          // Ended before their harness counted their tokens, and so in no figure of tokens. A record of a run made
+          // before records held tokens has none of the field, and is no such session.
+          withoutTokens: ofArm.filter((record) => record.outputTokens === null).length,
+          tools: toolCallsOf(ofArm, tools),
+        },
+      ];
+    })
+  );
+}
+
+// How the sessions of the lsp arm used the server, and how those that did and those that did not fared
+function serverUseOf(records) {
+  const ofArm = records.filter((record) => record.arm === "lsp");
+  const [called, notCalled] = [ofArm.filter(calledServer), ofArm.filter((record) => !calledServer(record))];
+  const solved = (group) => group.filter(isSolved).length;
+  const calls = {};
+  for (const record of ofArm) {
+    for (const [name, count] of Object.entries(record.toolCalls)) {
+      if (name.startsWith(LSP_PREFIX)) calls[name.slice(LSP_PREFIX.length)] = (calls[name.slice(LSP_PREFIX.length)] ?? 0) + count;
+    }
+  }
+  return {
+    sessions: ofArm.length,
+    called: called.length,
+    // The calls that the server answered, where `tools` counts every call that a session tried
+    answeredCalls: ofArm.reduce((total, record) => total + record.lspCalls, 0),
+    calledSolved: solved(called),
+    notCalledSolved: solved(notCalled),
+    calledWallMs: median(called.map((record) => record.wallMs)),
+    notCalledWallMs: median(notCalled.map((record) => record.wallMs)),
+    taskTypes: TASK_TYPES.filter((type) => ofArm.some((record) => record.type === type.id)).map((type) => {
+      const ofType = ofArm.filter((record) => record.type === type.id);
+      return { id: type.id, sessions: ofType.length, called: ofType.filter(calledServer).length };
+    }),
+    tools: Object.entries(calls)
+      .sort(([a, one], [b, other]) => other - one || byName(a, b))
+      .map(([tool, count]) => ({ tool, calls: count })),
+  };
+}
+
+// The endings that stop a session before the check, which name what went wrong by themselves
+const STOPPED = ENDINGS.filter(({ id }) => !["passed", "wrong-result", "does-not-compile", "not-judged"].includes(id));
+
+// The kinds that say the record does not tell what went wrong, which the report lists last
+const UNTOLD = ["unknown", "unstated"];
+
+// Every kind of failure in the order the report lists them
+const FAILURE_KINDS = [...PROBLEM_KINDS.filter(({ id }) => !UNTOLD.includes(id)), ...STOPPED, ...PROBLEM_KINDS.filter(({ id }) => UNTOLD.includes(id))];
+
+/**
+ * What a failed session failed by: what stopped it, or else the first thing
+ * that the check found wrong. The check names a build that fails first. Null
+ * for a solved session.
+ */
+function failureKindOf(record) {
+  const ending = endingOf(record);
+  if (ending === "passed") return null;
+  if (STOPPED.some(({ id }) => id === ending)) return ending;
+  return firstProblemKind(record);
+}
+
+// The failed sessions by kind and arm, and those of the lsp arm by whether they called the server
+function failuresOf(records, armIds) {
+  const counts = (group, kind) => group.filter((record) => failureKindOf(record) === kind).length;
+  const ofArm = (arm) => records.filter((record) => record.arm === arm);
+  return FAILURE_KINDS.filter(({ id }) => records.some((record) => failureKindOf(record) === id)).map(({ id, title }) => ({
+    id,
+    title,
+    ...Object.fromEntries(armIds.map((arm) => [arm, counts(ofArm(arm), id)])),
+    ...(armIds.includes("lsp")
+      ? { calledServer: counts(ofArm("lsp").filter(calledServer), id), notCalledServer: counts(ofArm("lsp").filter((record) => !calledServer(record)), id) }
+      : {}),
+  }));
 }
 
 /**
@@ -89,14 +297,14 @@ export function summarize(plan, allRecords, arms) {
   // An arm that was asked for and has no session yet still has every round waiting for it
   const armIds = Object.keys(ARMS).filter((arm) => (arms ? arms.includes(arm) : allRecords.some((record) => record.arm === arm)));
   // The arms are compared on the same work: a round of a task counts once every arm has done it
-  const round = (record) => `${record.task} #${record.repetition}`;
-  const complete = (key) => armIds.every((arm) => allRecords.some((record) => record.arm === arm && round(record) === key));
-  const records = allRecords.filter((record) => complete(round(record)));
+  const complete = (key) => armIds.every((arm) => allRecords.some((record) => record.arm === arm && roundOf(record) === key));
   // A record of a run made before there was a choice of harness names none, and ran in Claude Code
   const harness = harnessOf(ids[0]);
+  const records = allRecords.filter((record) => complete(roundOf(record))).map((record) => asCounted(record, harness));
   const costReported = harness.reportsCost;
+  const endings = endingsOf(harness, records);
   const perArm = (subset) =>
-    Object.fromEntries(armIds.map((arm) => [arm, measure(subset.filter((record) => record.arm === arm), harness)]));
+    Object.fromEntries(armIds.map((arm) => [arm, measure(subset.filter((record) => record.arm === arm), harness, endings)]));
   // The files that the target of each codebase involves, in the order of the plan's codebases
   const targetsOf = (subset) =>
     plan.codebases
@@ -108,7 +316,7 @@ export function summarize(plan, allRecords, arms) {
       .sort((a, b) => a - b)
       .map((level) => {
         const atLevel = subset.filter((record) => levelOf(record) === level);
-        return { level, targets: targetsOf(atLevel), ...perArm(atLevel) };
+        return { level, targets: targetsOf(atLevel), ...perArm(atLevel), savings: savingsOf(atLevel, costReported, false) };
       });
 
   return {
@@ -136,11 +344,24 @@ export function summarize(plan, allRecords, arms) {
       .map(({ label, modules, lines }) => ({ label, modules, lines })),
     arms: armIds.map((id) => ({ id, title: ARMS[id].title })),
     overall: perArm(records),
+    // How much the server saved over the whole run, with the interval of each figure, and how many draws it took
+    savings: savingsOf(records, costReported, true),
+    draws: DRAWS,
     taskTypes: TASK_TYPES.filter((type) => records.some((record) => record.type === type.id)).map((type) => {
       const ofType = records.filter((record) => record.type === type.id);
-      return { id: type.id, title: type.title, ...perArm(ofType), levels: perLevel(ofType) };
+      return { id: type.id, title: type.title, ...perArm(ofType), levels: perLevel(ofType), savings: savingsOf(ofType, costReported, false) };
     }),
+    // The savings at each level, over every task type
+    levels: [...new Set(records.map(levelOf))]
+      .sort((a, b) => a - b)
+      .map((level) => ({ level, savings: savingsOf(records.filter((record) => levelOf(record) === level), costReported, false) })),
+    activity: activityOf(records, armIds),
+    // Null where the run had no lsp arm
+    serverUse: armIds.includes("lsp") ? serverUseOf(records) : null,
+    failures: failuresOf(records, armIds),
     runs: records.map((record) => ({
+      // Its codebase's label, kind of task and level, which a comparison of runs sets the same rounds of side by side
+      task: record.task,
       codebase: record.codebase,
       type: record.type,
       level: levelOf(record),
@@ -149,6 +370,8 @@ export function summarize(plan, allRecords, arms) {
       repetition: record.repetition,
       outcome: record.outcome,
       ending: endingOf(record),
+      // What a failed session failed by, from what stopped it or what the check found. Null where it solved its task.
+      failureKind: failureKindOf(record),
       wallMs: record.wallMs,
       costUsd: record.costUsd,
       ...(costReported ? {} : Object.fromEntries(TOKENS.map((figure) => [figure, record[figure] ?? null]))),
@@ -161,7 +384,7 @@ export function summarize(plan, allRecords, arms) {
   };
 }
 
-const escapeHtml = (text) =>
+export const escapeHtml = (text) =>
   String(text).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
 
 // Shown where a session produced no figure, for example no cost because it never started
@@ -170,7 +393,7 @@ const MISSING = "n/a";
 // "1 session", "2 sessions"
 const count = (number, noun) => plural(number, noun, `${noun}s`);
 
-const FORMAT = {
+export const FORMAT = {
   solved: (group) => `${group.solved} of ${group.sessions}`,
   cost: (usd) => (usd === null ? MISSING : `$${usd.toFixed(2)}`),
   time(ms) {
@@ -181,6 +404,18 @@ const FORMAT = {
   },
   count: (value) => (value === null ? MISSING : String(Math.round(value))),
   tokens: (value) => (value === null || value === undefined ? MISSING : Math.round(value).toLocaleString("en-US")),
+  // A sum of many sessions' time, which runs into hours
+  duration(ms) {
+    const minutes = Math.round(ms / 60000);
+    return minutes < 60 ? FORMAT.time(ms) : `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
+  },
+  // A share in whole percent, with a minus sign where the server took more
+  percent: (value) => (value === null ? MISSING : `${Math.round(value) < 0 ? "\u2212" : ""}${Math.abs(Math.round(value))}%`),
+  interval: (bounds) => (bounds === null ? MISSING : `${FORMAT.percent(bounds[0])} to ${FORMAT.percent(bounds[1])}`),
+  mean: (value) => (value === null ? MISSING : value.toFixed(1)),
+  // A p-value in a table's cell, whose head names it, and in a sentence
+  p: (value) => (value === null ? MISSING : value < 0.001 ? "< 0.001" : value.toFixed(3)),
+  pIs: (value) => (value === null ? `p is ${MISSING}` : value < 0.001 ? "p < 0.001" : `p = ${value.toFixed(3)}`),
 };
 
 // What a session spent, as its harness reports it: a cost, or tokens where it reports none
@@ -244,6 +479,11 @@ p { margin: 0; }
 .tile .row { display: flex; align-items: baseline; gap: 8px; }
 .tile .value { font-size: 26px; font-weight: 600; line-height: 1.25; }
 .tile .key { align-self: center; margin-right: 0; }
+.tile .detail { color: var(--ink-2); margin-top: 4px; }
+.saved { margin-top: 12px; }
+.section { margin-top: 12px; }
+.section h3 { font-size: 13px; font-weight: 500; color: var(--ink-2); margin: 18px 0 4px; }
+.section .lede + h3 { margin-top: 12px; }
 figure { margin: 12px 0 0; overflow-x: auto; }
 figcaption { margin-bottom: 14px; }
 svg { display: block; width: 100%; min-width: 860px; height: auto; }
@@ -589,11 +829,11 @@ function endingsTable(summary) {
 
 function runsTable(summary) {
   const armTitle = Object.fromEntries(summary.arms.map((arm) => [arm.id, arm.title]));
-  const typeTitle = Object.fromEntries(summary.taskTypes.map((type) => [type.id, SHORT_TITLE[type.id] ?? type.title]));
+  const shortTitle = Object.fromEntries(summary.taskTypes.map((type) => [type.id, SHORT_TITLE[type.id] ?? type.title]));
   const rows = summary.runs
     .map(
       (run) =>
-        `<tr><td>${escapeHtml(run.codebase)}</td><td>${escapeHtml(typeTitle[run.type])}</td>` +
+        `<tr><td>${escapeHtml(run.codebase)}</td><td>${escapeHtml(shortTitle[run.type])}</td>` +
         `<td><span class="key ${run.arm}"></span>${escapeHtml(armTitle[run.arm])}</td><td>${escapeHtml(ENDING_TITLE[run.ending])}</td>` +
         `<td class="number">${escapeHtml(levelName(run.level))}</td><td class="number">${FORMAT.count(run.files)}</td>` +
         `<td class="number">${FORMAT.time(run.wallMs)}</td>${spentCells(run, summary.costReported)}` +
@@ -608,6 +848,214 @@ function runsTable(summary) {
     `<th class="number">Time</th>${spentHeads(summary.costReported)}<th class="number">Turns</th><th class="number">Tool calls</th>` +
     `<th class="number">Server calls</th><th class="number">Files</th><th class="number">API retries</th></tr></thead><tbody>${rows}</tbody></table></div>`
   );
+}
+
+// The figures of the savings as the page names and writes them
+const SAVED_TITLE = { wallMs: "Time", costUsd: "Cost", inputTokens: "Input tokens", outputTokens: "Output tokens" };
+const SAVED_FORMAT = { wallMs: FORMAT.duration, costUsd: FORMAT.cost, inputTokens: FORMAT.tokens, outputTokens: FORMAT.tokens };
+
+// The figures that a run's savings have: no cost where its harness reports none
+const savedFigures = (savings) => SAVED.filter((figure) => savings[figure] !== null);
+
+// A table in a card of its own, from rows of plain text, the first cell of each a label and the others figures
+export const tableOf = (heads, rows) =>
+  `<div class="table-card"><table><thead><tr>${heads.map((head, at) => `<th${at === 0 ? "" : ' class="number"'}>${escapeHtml(head)}</th>`).join("")}</tr></thead><tbody>` +
+  rows.map(([first, ...cells]) => `<tr><td>${escapeHtml(first)}</td>${cells.map((cell) => `<td class="number">${escapeHtml(cell)}</td>`).join("")}</tr>`).join("") +
+  `</tbody></table></div>`;
+
+// Why a saving of the whole run has no interval, or what its interval rests on
+const intervalLine = (saving) =>
+  saving.interval !== null
+    ? `95% interval ${FORMAT.interval(saving.interval)}, from ${count(saving.tasks, "task")}`
+    : saving.tasks < MIN_TASKS
+      ? `No interval: ${count(saving.tasks, "task")}, and an interval needs ${MIN_TASKS}`
+      : "No interval: in some draws of the tasks, the sessions without the server took none of it";
+
+function savingTile(figure, saving) {
+  const lines = [
+    intervalLine(saving),
+    `${SAVED_FORMAT[figure](saving.baseline)} without, ${SAVED_FORMAT[figure](saving.lsp)} with, over ${count(saving.pairs, "pair")}`,
+  ];
+  return (
+    `<div class="card tile"><div class="label">${escapeHtml(`${SAVED_TITLE[figure]} saved by the server`)}</div>` +
+    `<div class="row"><span class="value">${escapeHtml(FORMAT.percent(saving.savedPercent))}</span></div>` +
+    `${lines.map((line) => `<div class="detail">${escapeHtml(line)}</div>`).join("")}</div>`
+  );
+}
+
+/**
+ * What the server saved over the whole run, under the headline tiles, and
+ * the tasks that one arm solved more often. Empty for a run of one arm.
+ */
+function savingTiles(summary) {
+  if (summary.arms.length < 2) return "";
+  const { savings, arms } = summary;
+  const { tasks, signP, baselineOnly, lspOnly } = savings.solved;
+  const more = { baseline: tasks.baselineMore, lsp: tasks.lspMore };
+  const details = [
+    `${FORMAT.pIs(signP)} by the exact sign test. ${tasks.tied} of ${count(tasks.baselineMore + tasks.lspMore + tasks.tied, "task")} were solved as often by both.`,
+    `Sessions solved by one arm only, with each repetition beside the one of the same number: ${baselineOnly} without the server, ${lspOnly} with it.`,
+  ];
+  const solvedTile =
+    `<div class="card tile"><div class="label">Tasks that one arm solved more often</div>` +
+    arms.map((arm) => `<div class="row"><span class="key ${arm.id}"></span><span class="value">${more[arm.id]}</span></div>`).join("") +
+    `${details.map((line) => `<div class="detail">${escapeHtml(line)}</div>`).join("")}</div>`;
+  return `<div class="tiles saved">${savedFigures(savings).map((figure) => savingTile(figure, savings[figure])).join("")}${solvedTile}</div><p class="note">${escapeHtml(savingsNote())}</p>`;
+}
+
+/** What a saving, its interval and the sign test are, in the words of the pages. */
+export function savingsNote() {
+  return (
+    `A saving is how much less the sessions with the server took, summed over the rounds that both arms did. A pair that lacks a figure, such as a session killed before it reported a cost, does not count in that figure. ` +
+    `The range of each saving is its 95% interval: the run's tasks were drawn again with replacement ${DRAWS.toLocaleString("en-US")} times, all repetitions of a task together, and the range holds the middle 95% of the savings of those draws. ` +
+    `A saving of fewer than ${MIN_TASKS} tasks gets no range, since drawing so few again shows little of how it can vary. ` +
+    `A task counts for the arm that solved more of its rounds, and for neither where both arms solved as many. ` +
+    `The exact sign test asks how often tossing a coin for each task that counts would split them between the arms as unevenly as this, or more. ` +
+    `A small p-value says that such a split would seldom come from chance alone. It does not say how large the difference is, and it holds for these tasks, not for tasks that the plan did not have. ` +
+    `The sessions solved by one arm only set each repetition of a task beside the one of the same number in the other arm. That order is arbitrary, so they are counts and no test rests on them.`
+  );
+}
+
+/**
+ * One saving as a table's cell: its share, then its interval where it has
+ * one and `interval` asks for it, and its pairs where a missing figure left
+ * some of the group's `pairs` out.
+ */
+export function savingCell(saving, pairs, { interval = false } = {}) {
+  const beside = [...(interval && saving.interval ? [FORMAT.interval(saving.interval)] : []), ...(saving.pairs === pairs ? [] : [count(saving.pairs, "pair")])];
+  return `${FORMAT.percent(saving.savedPercent)}${beside.length === 0 ? "" : ` (${beside.join(", ")})`}`;
+}
+
+// The cells of one group's savings: each figure, with its pairs where a missing figure left some out, then the tasks each arm solved more often
+function savingCells(savings) {
+  const figures = savedFigures(savings).map((figure) => savingCell(savings[figure], savings.pairs));
+  const { tasks, signP } = savings.solved;
+  return [String(savings.pairs), ...figures, String(tasks.baselineMore), String(tasks.lspMore), FORMAT.p(signP)];
+}
+
+const savingHeads = (summary, first) => [
+  first,
+  "Pairs",
+  ...savedFigures(summary.savings).map((figure) => `${SAVED_TITLE[figure]} saved`),
+  "Tasks solved more often without the server",
+  "Tasks solved more often with it",
+  "Sign test p",
+];
+
+function savingsSection(summary) {
+  if (summary.arms.length < 2) return "";
+  const byType = summary.taskTypes.map((type) => [type.title, ...savingCells(type.savings)]);
+  const byLevel = summary.levels.map(({ level, savings }) => [levelName(level), ...savingCells(savings)]);
+  const lede =
+    "The figures of the tiles above for each kind of task and each level, without their intervals, since a handful of tasks carries each of them." +
+    (summary.costReported ? "" : ` ${summary.harness} reports no cost, so there is none to save.`);
+  return (
+    `<section class="card section"><h2>What the server saved</h2><p class="lede">${escapeHtml(lede)}</p>` +
+    `<h3>By kind of task</h3>${tableOf(savingHeads(summary, "Kind of task"), byType)}` +
+    `<h3>By level, over every kind of task</h3>${tableOf(savingHeads(summary, "Level"), byLevel)}</section>`
+  );
+}
+
+/** Tool calls, replies and output tokens per session, and the calls to each tool, per arm. In `short`, the calls to each tool alone. */
+export function toolTables(summary, { short = false } = {}) {
+  const { arms, activity } = summary;
+  const measures = [
+    ["Tool calls", "toolCalls", FORMAT.mean, FORMAT.count],
+    ["Replies", "replies", FORMAT.mean, FORMAT.count],
+    ["Output tokens", "outputTokens", (value) => FORMAT.tokens(value), FORMAT.tokens],
+  ];
+  const perSession = tableOf(
+    ["Figure", ...arms.flatMap((arm) => [`${arm.title}, mean`, `${arm.title}, median`])],
+    measures.map(([title, figure, meanFormat, medianFormat]) => [title, ...arms.flatMap((arm) => [meanFormat(activity[arm.id][figure].mean), medianFormat(activity[arm.id][figure].median)])])
+  );
+  const byTool = tableOf(
+    ["Tool", ...arms.flatMap((arm) => [`${arm.title}, calls`, `${arm.title}, per session`])],
+    activity[arms[0].id].tools.map(({ tool }, at) => [tool, ...arms.flatMap((arm) => [String(activity[arm.id].tools[at].calls), FORMAT.mean(activity[arm.id].tools[at].perSession)])])
+  );
+  const tools = `<h3>Tool calls by tool, all of the server's as one</h3>${byTool}`;
+  const tokenless = arms.filter((arm) => activity[arm.id].withoutTokens > 0).map((arm) => `${count(activity[arm.id].withoutTokens, "session")} ${arm.title.toLowerCase()}`);
+  const note = tokenless.length === 0 ? "" : `<p class="note">${escapeHtml(`Ended before ${summary.harness} counted their tokens, and left out of the output tokens: ${tokenless.join(", ")}.`)}</p>`;
+  return short ? tools : `<h3>Per session</h3>${perSession}${note}${tools}`;
+}
+
+const typeTitle = (id) => TASK_TYPES.find((type) => type.id === id)?.title ?? id;
+
+/**
+ * How the sessions with the server used it, overall and by kind of task, and
+ * the calls to each of its tools, which `short` leaves out. Empty for a run
+ * without the lsp arm.
+ */
+export function serverUseTables(summary, { short = false } = {}) {
+  const use = summary.serverUse;
+  if (use === null) return "";
+  const notCalled = use.sessions - use.called;
+  const lede =
+    `${use.called} of ${count(use.sessions, "session")} with the language server called it and had at least one call answered. ` +
+    (use.called > 0 ? `${use.calledSolved} of those ${use.called} solved their task. Their median time, solved or not, was ${FORMAT.time(use.calledWallMs)}. ` : "") +
+    (notCalled > 0
+      ? `${use.notCalledSolved} of the ${count(notCalled, "session")} that did not call it solved theirs, and their median time, solved or not, was ${FORMAT.time(use.notCalledWallMs)}.`
+      : "");
+  const byType = tableOf(
+    ["Kind of task", "Sessions", "Called the server"],
+    use.taskTypes.map(({ id, sessions, called }) => [typeTitle(id), String(sessions), String(called)])
+  );
+  const tried = use.tools.reduce((total, { calls }) => total + calls, 0);
+  // A harness can count a call that it reports as failed, which is no answer of the server
+  const unanswered =
+    tried === use.answeredCalls
+      ? ""
+      : `<p class="note">${escapeHtml(`These are the calls that the sessions tried. The server answered ${use.answeredCalls} of the ${tried}, and ${summary.harness} reports the others as failed. Only the calls it answered make a session one that called it, and only those count as "Server calls" in the table of every session.`)}</p>`;
+  const tools =
+    short || use.tools.length === 0
+      ? ""
+      : `<h3>The server's tools by calls tried</h3>${tableOf(["Tool", "Calls tried"], use.tools.map(({ tool, calls }) => [tool, String(calls)]))}${unanswered}`;
+  return `<h3>How the sessions with the server used it</h3><p class="lede">${escapeHtml(lede.trim())}</p>${byType}${tools}`;
+}
+
+/**
+ * The failed sessions by kind and arm, and then those of the lsp arm by
+ * whether they called the server, which `short` leaves out.
+ */
+export function failureTables(summary, { short = false } = {}) {
+  const { arms, failures } = summary;
+  if (summary.runs.length === 0) return `<h3>Failures by kind</h3><p class="lede">No session counts yet, since no round of a task has been done in every arm.</p>`;
+  if (failures.length === 0) return `<h3>Failures by kind</h3><p class="lede">Every session solved its task.</p>`;
+  const lede = "A failed session counts once, under what stopped it, or else under the first thing the check found wrong with its result.";
+  const byArm = tableOf(["Kind of failure", ...arms.map((arm) => arm.title)], failures.map((kind) => [kind.title, ...arms.map((arm) => String(kind[arm.id]))]));
+  const split =
+    short || summary.serverUse === null
+      ? ""
+      : `<h3>Failures by whether the session called the server</h3>${tableOf(
+          ["Kind of failure", ...arms.filter((arm) => arm.id !== "lsp").map((arm) => arm.title), "With language server, called it", "With language server, did not call it"],
+          failures.map((kind) => [kind.title, ...arms.filter((arm) => arm.id !== "lsp").map((arm) => String(kind[arm.id])), String(kind.calledServer), String(kind.notCalledServer)])
+        )}`;
+  return `<h3>Failures by kind</h3><p class="lede">${escapeHtml(lede)}</p>${byArm}${split}`;
+}
+
+function activitySection(summary) {
+  const lede = "What the sessions of each arm did, which explains much of the time and the tokens they took.";
+  return `<section class="card section"><h2>What the sessions did</h2><p class="lede">${lede}</p>${toolTables(summary)}${serverUseTables(summary)}${failureTables(summary)}</section>`;
+}
+
+/** A page of the benchmark: its style, its tooltip and `body` inside <main>. */
+export function htmlPage(title, body) {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(title)}</title>
+<style>${STYLE}</style>
+</head>
+<body>
+<main>
+${body}
+</main>
+<div id="tip" role="tooltip"></div>
+<script>${SCRIPT}</script>
+</body>
+</html>
+`;
 }
 
 /** @param {ReturnType<typeof summarize>} summary */
@@ -633,29 +1081,19 @@ export function renderReport(summary) {
     tile("Median tool calls per session", arms, overall, (group) => FORMAT.count(group.toolCalls)),
   ].join("");
 
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Elm refactoring benchmark</title>
-<style>${STYLE}</style>
-</head>
-<body>
-<main>
-<h1>Elm refactoring with and without the language server</h1>
+  return htmlPage(
+    "Elm refactoring benchmark",
+    `<h1>Elm refactoring with and without the language server</h1>
 <p class="lede">${escapeHtml(lede)}</p>
 ${legend(arms)}
 <div class="tiles">${tiles}</div>
+${savingTiles(summary)}
 ${taskChart(summary)}
+${savingsSection(summary)}
+${activitySection(summary)}
 ${levelSection(summary)}
 ${endingsTable(summary)}
 ${runsTable(summary)}
-<p class="note">Both arms get the same prompt, the same model and the same built-in tools of ${escapeHtml(summary.harness)} (${escapeHtml(summary.tools.join(", "))}). The only difference is whether the session has the language server, with its tools and the notes on paths, lines and columns that it sends when a session connects. Each session starts from a fresh checkout with a warm compiler cache. ${limitsNote(summary)} "Session error" is a session that ended on an error of its own, such as a request that grew too long for the model. "Level" is the number of files that the plan asked a target to involve, and "Target files" the number that the session's target involves. ${summary.turnsReported ? `"Turns" is the number of turns that ${escapeHtml(summary.harness)} reports for the session` : `"Turns" is empty, since ${escapeHtml(summary.harness)} reports no turns of the agent`}, "Server calls" counts the calls to the language server, and "Files" the files the session changed. A module that moved counts twice there, for the file that went and the one that came. ${summary.retriesReported ? `"API retries" counts how often ${escapeHtml(summary.harness)} had to ask the API again, which tells a session that waited from one that worked slowly.` : `"API retries" is empty where ${escapeHtml(summary.harness)} does not say when it asks the API again.`}</p>
-</main>
-<div id="tip" role="tooltip"></div>
-<script>${SCRIPT}</script>
-</body>
-</html>
-`;
+<p class="note">Both arms get the same prompt, the same model and the same built-in tools of ${escapeHtml(summary.harness)} (${escapeHtml(summary.tools.join(", "))}). The only difference is whether the session has the language server, with its tools and the notes on paths, lines and columns that it sends when a session connects. Each session starts from a fresh checkout with a warm compiler cache. ${limitsNote(summary)} "Session error" is a session that ended on an error of its own, such as a request that grew too long for the model. "Level" is the number of files that the plan asked a target to involve, and "Target files" the number that the session's target involves. ${summary.turnsReported ? `"Turns" is the number of turns that ${escapeHtml(summary.harness)} reports for the session` : `"Turns" is empty, since ${escapeHtml(summary.harness)} reports no turns of the agent`}, "Server calls" counts the calls to the language server, and "Files" the files the session changed. A module that moved counts twice there, for the file that went and the one that came. ${summary.retriesReported ? `"API retries" counts how often ${escapeHtml(summary.harness)} had to ask the API again, which tells a session that waited from one that worked slowly.` : `"API retries" is empty where ${escapeHtml(summary.harness)} does not say when it asks the API again.`}</p>`
+  );
 }

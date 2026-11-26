@@ -25,6 +25,7 @@ import { basename, dirname, join, relative } from "path";
 import { NO_SOURCES, projectDirectories } from "./elm-source.mjs";
 import { OWN_SETTINGS, ownEnvironment } from "./git.mjs";
 import { placeOf } from "./place.mjs";
+import { problem } from "./problems.mjs";
 import { runGroup } from "./process.mjs";
 
 // Output of a failing check is kept this long in a run record
@@ -565,7 +566,7 @@ export async function isOnItsCommit(worktree) {
 
 /**
  * Run the codebase's check command. `problem` says in one sentence how it
- * failed, with the end of what it printed. `timedOut` tells a build that ran
+ * failed, with the end of what it printed, and `kind` is the kind of that. `timedOut` tells a build that ran
  * out of time, and so said nothing about the project, from one that failed.
  */
 export async function runCheck(worktree, codebase) {
@@ -573,7 +574,8 @@ export async function runCheck(worktree, codebase) {
   // A build script can catch the signal that ends it and exit as if all were well
   if (result.code === 0 && !result.timedOut) return { ok: true, timedOut: false, problem: "" };
   const output = `${result.stdout}${result.stderr}`.slice(-OUTPUT_TAIL);
-  return { ok: false, timedOut: result.timedOut, problem: result.timedOut ? "the check command ran out of time" : `the check command fails: ${output}` };
+  const found = result.timedOut ? problem("check-timed-out") : problem("check-fails", { output });
+  return { ok: false, timedOut: result.timedOut, problem: found.text, kind: found.kind };
 }
 
 /**
