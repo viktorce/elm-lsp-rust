@@ -1,0 +1,2425 @@
+{
+  "runs": [
+    {
+      "name": "claude-opus-5-5 in Claude Code",
+      "coverage": {
+        "planned": 81,
+        "rounds": [
+          {
+            "rounds": 3,
+            "tasks": 81
+          }
+        ]
+      },
+      "setup": {
+        "agent": "Claude Code 2.1.323",
+        "languageServers": [
+          "0.3.39 (1b4c832ffd09555c1200b217c4f7475d45d8944c), built 2026-11-24 19:12 UTC"
+        ],
+        "recorded": true,
+        "timeoutMin": 20,
+        "maxBudgetUsd": 5,
+        "maxTokens": null,
+        "benchmark": "6fc3ead7d3b69a98dccb7dc2e49b44a37037913e"
+      },
+      "model": "claude-opus-5-5",
+      "harness": "Claude Code",
+      "costReported": true,
+      "solved": {
+        "baseline": {
+          "solved": 237,
+          "sessions": 243
+        },
+        "lsp": {
+          "solved": 243,
+          "sessions": 243
+        }
+      },
+      "savings": {
+        "pairs": 243,
+        "wallMs": {
+          "pairs": 243,
+          "baseline": 14070917,
+          "lsp": 9934596,
+          "savedPercent": 29.396243329414848,
+          "tasks": 81,
+          "interval": [
+            23.00039127970615,
+            35.34958520866146
+          ]
+        },
+        "costUsd": {
+          "pairs": 243,
+          "baseline": 60.762215999999974,
+          "lsp": 41.43132720000003,
+          "savedPercent": 31.81399572392152,
+          "tasks": 81,
+          "interval": [
+            26.32628445242633,
+            37.17128613304309
+          ]
+        },
+        "inputTokens": {
+          "pairs": 243,
+          "baseline": 32921969,
+          "lsp": 27720919,
+          "savedPercent": 15.798113411746424,
+          "tasks": 81,
+          "interval": [
+            3.6175050916662346,
+            26.453133799951825
+          ]
+        },
+        "outputTokens": {
+          "pairs": 243,
+          "baseline": 1125066,
+          "lsp": 697509,
+          "savedPercent": 38.00283716688621,
+          "tasks": 81,
+          "interval": [
+            32.389045167205246,
+            43.23632793672828
+          ]
+        },
+        "solved": {
+          "both": 237,
+          "baselineOnly": 0,
+          "lspOnly": 6,
+          "neither": 0,
+          "tasks": {
+            "baselineMore": 0,
+            "lspMore": 4,
+            "tied": 77
+          },
+          "signP": 0.125
+        }
+      },
+      "activity": {
+        "baseline": {
+          "sessions": 243,
+          "toolCalls": {
+            "mean": 7.806584362139918,
+            "median": 6
+          },
+          "replies": {
+            "mean": 13.802469135802468,
+            "median": 12
+          },
+          "outputTokens": {
+            "mean": 4629.901234567901,
+            "median": 4133
+          },
+          "withoutTokens": 0,
+          "tools": [
+            {
+              "tool": "language server",
+              "calls": 0,
+              "perSession": 0
+            },
+            {
+              "tool": "Bash",
+              "calls": 1307,
+              "perSession": 5.378600823045267
+            },
+            {
+              "tool": "Grep",
+              "calls": 238,
+              "perSession": 0.9794238683127572
+            },
+            {
+              "tool": "Read",
+              "calls": 164,
+              "perSession": 0.6748971193415638
+            },
+            {
+              "tool": "Edit",
+              "calls": 188,
+              "perSession": 0.7736625514403292
+            }
+          ]
+        },
+        "lsp": {
+          "sessions": 243,
+          "toolCalls": {
+            "mean": 4.691358024691358,
+            "median": 5
+          },
+          "replies": {
+            "mean": 8.51440329218107,
+            "median": 8
+          },
+          "outputTokens": {
+            "mean": 2870.4074074074074,
+            "median": 3166
+          },
+          "withoutTokens": 0,
+          "tools": [
+            {
+              "tool": "language server",
+              "calls": 293,
+              "perSession": 1.205761316872428
+            },
+            {
+              "tool": "Bash",
+              "calls": 513,
+              "perSession": 2.111111111111111
+            },
+            {
+              "tool": "Grep",
+              "calls": 271,
+              "perSession": 1.1152263374485596
+            },
+            {
+              "tool": "Read",
+              "calls": 56,
+              "perSession": 0.23045267489711935
+            },
+            {
+              "tool": "Edit",
+              "calls": 7,
+              "perSession": 0.02880658436213992
+            }
+          ]
+        }
+      },
+      "serverUse": {
+        "sessions": 243,
+        "called": 240,
+        "answeredCalls": 293,
+        "calledSolved": 240,
+        "notCalledSolved": 3,
+        "calledWallMs": 40487,
+        "notCalledWallMs": 57171,
+        "taskTypes": [
+          {
+            "id": "rename-function",
+            "sessions": 27,
+            "called": 27
+          },
+          {
+            "id": "rename-shared-function",
+            "sessions": 18,
+            "called": 18
+          },
+          {
+            "id": "rename-variant",
+            "sessions": 27,
+            "called": 27
+          },
+          {
+            "id": "rename-field",
+            "sessions": 24,
+            "called": 24
+          },
+          {
+            "id": "rename-module",
+            "sessions": 27,
+            "called": 27
+          },
+          {
+            "id": "add-variant",
+            "sessions": 21,
+            "called": 21
+          },
+          {
+            "id": "rename-type",
+            "sessions": 27,
+            "called": 27
+          },
+          {
+            "id": "move-function",
+            "sessions": 24,
+            "called": 22
+          },
+          {
+            "id": "remove-variant",
+            "sessions": 27,
+            "called": 27
+          },
+          {
+            "id": "remove-field",
+            "sessions": 21,
+            "called": 20
+          }
+        ],
+        "tools": [
+          {
+            "tool": "elm_rename_function",
+            "calls": 45
+          },
+          {
+            "tool": "elm_remove_variant",
+            "calls": 27
+          },
+          {
+            "tool": "elm_rename_file",
+            "calls": 27
+          },
+          {
+            "tool": "elm_rename_type",
+            "calls": 27
+          },
+          {
+            "tool": "elm_rename_variant",
+            "calls": 27
+          },
+          {
+            "tool": "elm_rename_field",
+            "calls": 24
+          },
+          {
+            "tool": "elm_prepare_remove_variant",
+            "calls": 23
+          },
+          {
+            "tool": "elm_move_function",
+            "calls": 22
+          },
+          {
+            "tool": "elm_add_variant",
+            "calls": 21
+          },
+          {
+            "tool": "elm_prepare_add_variant",
+            "calls": 21
+          },
+          {
+            "tool": "elm_remove_field",
+            "calls": 20
+          },
+          {
+            "tool": "elm_prepare_remove_field",
+            "calls": 9
+          }
+        ]
+      },
+      "failures": [
+        {
+          "id": "inside-string",
+          "title": "Changed a string literal",
+          "baseline": 3,
+          "lsp": 0,
+          "calledServer": 0,
+          "notCalledServer": 0
+        },
+        {
+          "id": "imports",
+          "title": "Changed the imports or the module line beyond the task",
+          "baseline": 3,
+          "lsp": 0,
+          "calledServer": 0,
+          "notCalledServer": 0
+        }
+      ]
+    },
+    {
+      "name": "claude-sonnet-5-5 in Claude Code",
+      "coverage": {
+        "planned": 81,
+        "rounds": [
+          {
+            "rounds": 3,
+            "tasks": 81
+          }
+        ]
+      },
+      "setup": {
+        "agent": "Claude Code 2.1.323",
+        "languageServers": [
+          "0.3.39 (1b4c832ffd09555c1200b217c4f7475d45d8944c), built 2026-11-24 19:12 UTC"
+        ],
+        "recorded": true,
+        "timeoutMin": 20,
+        "maxBudgetUsd": 5,
+        "maxTokens": null,
+        "benchmark": "6fc3ead7d3b69a98dccb7dc2e49b44a37037913e"
+      },
+      "model": "claude-sonnet-5-5",
+      "harness": "Claude Code",
+      "costReported": true,
+      "solved": {
+        "baseline": {
+          "solved": 227,
+          "sessions": 243
+        },
+        "lsp": {
+          "solved": 242,
+          "sessions": 243
+        }
+      },
+      "savings": {
+        "pairs": 243,
+        "wallMs": {
+          "pairs": 243,
+          "baseline": 7445726,
+          "lsp": 4750625,
+          "savedPercent": 36.196618032949374,
+          "tasks": 81,
+          "interval": [
+            29.557432336999558,
+            42.37628564946303
+          ]
+        },
+        "costUsd": {
+          "pairs": 243,
+          "baseline": 24.2418965,
+          "lsp": 13.584754,
+          "savedPercent": 43.96166983057617,
+          "tasks": 81,
+          "interval": [
+            36.83068503408004,
+            50.443917310609756
+          ]
+        },
+        "inputTokens": {
+          "pairs": 243,
+          "baseline": 30282107,
+          "lsp": 23289946,
+          "savedPercent": 23.09007428049838,
+          "tasks": 81,
+          "interval": [
+            9.264731346644272,
+            34.78094644853018
+          ]
+        },
+        "outputTokens": {
+          "pairs": 243,
+          "baseline": 817406,
+          "lsp": 346328,
+          "savedPercent": 57.630846849668345,
+          "tasks": 81,
+          "interval": [
+            51.38030013108781,
+            63.13180334085471
+          ]
+        },
+        "solved": {
+          "both": 227,
+          "baselineOnly": 0,
+          "lspOnly": 15,
+          "neither": 1,
+          "tasks": {
+            "baselineMore": 0,
+            "lspMore": 12,
+            "tied": 69
+          },
+          "signP": 0.0004882812500000003
+        }
+      },
+      "activity": {
+        "baseline": {
+          "sessions": 243,
+          "toolCalls": {
+            "mean": 7.300411522633745,
+            "median": 6
+          },
+          "replies": {
+            "mean": 12.798353909465021,
+            "median": 11
+          },
+          "outputTokens": {
+            "mean": 3363.8106995884773,
+            "median": 2814
+          },
+          "withoutTokens": 0,
+          "tools": [
+            {
+              "tool": "language server",
+              "calls": 0,
+              "perSession": 0
+            },
+            {
+              "tool": "Bash",
+              "calls": 1276,
+              "perSession": 5.251028806584362
+            },
+            {
+              "tool": "Grep",
+              "calls": 289,
+              "perSession": 1.1893004115226338
+            },
+            {
+              "tool": "Read",
+              "calls": 92,
+              "perSession": 0.3786008230452675
+            },
+            {
+              "tool": "Edit",
+              "calls": 117,
+              "perSession": 0.48148148148148145
+            }
+          ]
+        },
+        "lsp": {
+          "sessions": 243,
+          "toolCalls": {
+            "mean": 3.950617283950617,
+            "median": 4
+          },
+          "replies": {
+            "mean": 7.032921810699588,
+            "median": 7
+          },
+          "outputTokens": {
+            "mean": 1425.2181069958847,
+            "median": 1206
+          },
+          "withoutTokens": 0,
+          "tools": [
+            {
+              "tool": "language server",
+              "calls": 264,
+              "perSession": 1.0864197530864197
+            },
+            {
+              "tool": "Bash",
+              "calls": 411,
+              "perSession": 1.691358024691358
+            },
+            {
+              "tool": "Grep",
+              "calls": 231,
+              "perSession": 0.9506172839506173
+            },
+            {
+              "tool": "Read",
+              "calls": 46,
+              "perSession": 0.18930041152263374
+            },
+            {
+              "tool": "Edit",
+              "calls": 8,
+              "perSession": 0.03292181069958848
+            }
+          ]
+        }
+      },
+      "serverUse": {
+        "sessions": 243,
+        "called": 227,
+        "answeredCalls": 264,
+        "calledSolved": 226,
+        "notCalledSolved": 16,
+        "calledWallMs": 17921,
+        "notCalledWallMs": 23480.5,
+        "taskTypes": [
+          {
+            "id": "rename-function",
+            "sessions": 27,
+            "called": 25
+          },
+          {
+            "id": "rename-shared-function",
+            "sessions": 18,
+            "called": 18
+          },
+          {
+            "id": "rename-variant",
+            "sessions": 27,
+            "called": 27
+          },
+          {
+            "id": "rename-field",
+            "sessions": 24,
+            "called": 24
+          },
+          {
+            "id": "rename-module",
+            "sessions": 27,
+            "called": 27
+          },
+          {
+            "id": "add-variant",
+            "sessions": 21,
+            "called": 21
+          },
+          {
+            "id": "rename-type",
+            "sessions": 27,
+            "called": 27
+          },
+          {
+            "id": "move-function",
+            "sessions": 24,
+            "called": 21
+          },
+          {
+            "id": "remove-variant",
+            "sessions": 27,
+            "called": 27
+          },
+          {
+            "id": "remove-field",
+            "sessions": 21,
+            "called": 10
+          }
+        ],
+        "tools": [
+          {
+            "tool": "elm_rename_function",
+            "calls": 43
+          },
+          {
+            "tool": "elm_remove_variant",
+            "calls": 27
+          },
+          {
+            "tool": "elm_rename_type",
+            "calls": 27
+          },
+          {
+            "tool": "elm_rename_variant",
+            "calls": 27
+          },
+          {
+            "tool": "elm_rename_field",
+            "calls": 24
+          },
+          {
+            "tool": "elm_move_function",
+            "calls": 22
+          },
+          {
+            "tool": "elm_add_variant",
+            "calls": 21
+          },
+          {
+            "tool": "elm_prepare_add_variant",
+            "calls": 21
+          },
+          {
+            "tool": "elm_move_file",
+            "calls": 17
+          },
+          {
+            "tool": "elm_remove_field",
+            "calls": 11
+          },
+          {
+            "tool": "elm_rename_file",
+            "calls": 10
+          },
+          {
+            "tool": "elm_diagnostics",
+            "calls": 8
+          },
+          {
+            "tool": "elm_prepare_remove_variant",
+            "calls": 6
+          }
+        ]
+      },
+      "failures": [
+        {
+          "id": "change-missing",
+          "title": "The change that was asked for is missing",
+          "baseline": 1,
+          "lsp": 0,
+          "calledServer": 0,
+          "notCalledServer": 0
+        },
+        {
+          "id": "inside-string",
+          "title": "Changed a string literal",
+          "baseline": 7,
+          "lsp": 1,
+          "calledServer": 1,
+          "notCalledServer": 0
+        },
+        {
+          "id": "imports",
+          "title": "Changed the imports or the module line beyond the task",
+          "baseline": 2,
+          "lsp": 0,
+          "calledServer": 0,
+          "notCalledServer": 0
+        },
+        {
+          "id": "removal-differs",
+          "title": "Left the code otherwise than the removal makes it",
+          "baseline": 4,
+          "lsp": 0,
+          "calledServer": 0,
+          "notCalledServer": 0
+        },
+        {
+          "id": "beyond-branches",
+          "title": "Changed more than the variant and its branches",
+          "baseline": 1,
+          "lsp": 0,
+          "calledServer": 0,
+          "notCalledServer": 0
+        },
+        {
+          "id": "non-elm-file",
+          "title": "Changed a file that is no Elm source",
+          "baseline": 1,
+          "lsp": 0,
+          "calledServer": 0,
+          "notCalledServer": 0
+        }
+      ]
+    },
+    {
+      "name": "claude-haiku-5-5 in Claude Code",
+      "coverage": {
+        "planned": 81,
+        "rounds": [
+          {
+            "rounds": 3,
+            "tasks": 81
+          }
+        ]
+      },
+      "setup": {
+        "agent": "Claude Code 2.1.323",
+        "languageServers": [
+          "0.3.39 (1b4c832ffd09555c1200b217c4f7475d45d8944c), built 2026-11-24 19:12 UTC"
+        ],
+        "recorded": true,
+        "timeoutMin": 20,
+        "maxBudgetUsd": 5,
+        "maxTokens": null,
+        "benchmark": "6fc3ead7d3b69a98dccb7dc2e49b44a37037913e"
+      },
+      "model": "claude-haiku-5-5",
+      "harness": "Claude Code",
+      "costReported": true,
+      "solved": {
+        "baseline": {
+          "solved": 228,
+          "sessions": 243
+        },
+        "lsp": {
+          "solved": 241,
+          "sessions": 243
+        }
+      },
+      "savings": {
+        "pairs": 243,
+        "wallMs": {
+          "pairs": 243,
+          "baseline": 14179206,
+          "lsp": 7574171,
+          "savedPercent": 46.58254489003122,
+          "tasks": 81,
+          "interval": [
+            35.92360359534205,
+            54.77530091078482
+          ]
+        },
+        "costUsd": {
+          "pairs": 243,
+          "baseline": 3.416971160000001,
+          "lsp": 1.6486001799999985,
+          "savedPercent": 51.7525872240608,
+          "tasks": 81,
+          "interval": [
+            45.815533922027264,
+            56.90287156951712
+          ]
+        },
+        "inputTokens": {
+          "pairs": 243,
+          "baseline": 63895287,
+          "lsp": 37280309,
+          "savedPercent": 41.65405501660866,
+          "tasks": 81,
+          "interval": [
+            30.422072885202823,
+            51.19085720791441
+          ]
+        },
+        "outputTokens": {
+          "pairs": 243,
+          "baseline": 2789630,
+          "lsp": 1110422,
+          "savedPercent": 60.194649469642926,
+          "tasks": 81,
+          "interval": [
+            54.639475805256886,
+            64.95110542662516
+          ]
+        },
+        "solved": {
+          "both": 228,
+          "baselineOnly": 0,
+          "lspOnly": 13,
+          "neither": 2,
+          "tasks": {
+            "baselineMore": 0,
+            "lspMore": 8,
+            "tied": 73
+          },
+          "signP": 0.007812500000000002
+        }
+      },
+      "activity": {
+        "baseline": {
+          "sessions": 243,
+          "toolCalls": {
+            "mean": 17.950617283950617,
+            "median": 11
+          },
+          "replies": {
+            "mean": 30.82304526748971,
+            "median": 25
+          },
+          "outputTokens": {
+            "mean": 11479.958847736625,
+            "median": 9313
+          },
+          "withoutTokens": 0,
+          "tools": [
+            {
+              "tool": "language server",
+              "calls": 0,
+              "perSession": 0
+            },
+            {
+              "tool": "Edit",
+              "calls": 1667,
+              "perSession": 6.860082304526749
+            },
+            {
+              "tool": "Bash",
+              "calls": 1064,
+              "perSession": 4.378600823045267
+            },
+            {
+              "tool": "Read",
+              "calls": 1015,
+              "perSession": 4.176954732510288
+            },
+            {
+              "tool": "Grep",
+              "calls": 603,
+              "perSession": 2.4814814814814814
+            },
+            {
+              "tool": "Glob",
+              "calls": 7,
+              "perSession": 0.02880658436213992
+            },
+            {
+              "tool": "Write",
+              "calls": 6,
+              "perSession": 0.024691358024691357
+            },
+            {
+              "tool": "Mcp__elm-lsp__elm_diagnostics",
+              "calls": 0,
+              "perSession": 0
+            }
+          ]
+        },
+        "lsp": {
+          "sessions": 243,
+          "toolCalls": {
+            "mean": 7.3539094650205765,
+            "median": 6
+          },
+          "replies": {
+            "mean": 14.91769547325103,
+            "median": 13
+          },
+          "outputTokens": {
+            "mean": 4569.6378600823045,
+            "median": 4141
+          },
+          "withoutTokens": 0,
+          "tools": [
+            {
+              "tool": "language server",
+              "calls": 360,
+              "perSession": 1.4814814814814814
+            },
+            {
+              "tool": "Edit",
+              "calls": 226,
+              "perSession": 0.9300411522633745
+            },
+            {
+              "tool": "Bash",
+              "calls": 504,
+              "perSession": 2.074074074074074
+            },
+            {
+              "tool": "Read",
+              "calls": 279,
+              "perSession": 1.1481481481481481
+            },
+            {
+              "tool": "Grep",
+              "calls": 413,
+              "perSession": 1.699588477366255
+            },
+            {
+              "tool": "Glob",
+              "calls": 4,
+              "perSession": 0.01646090534979424
+            },
+            {
+              "tool": "Write",
+              "calls": 0,
+              "perSession": 0
+            },
+            {
+              "tool": "Mcp__elm-lsp__elm_diagnostics",
+              "calls": 1,
+              "perSession": 0.00411522633744856
+            }
+          ]
+        }
+      },
+      "serverUse": {
+        "sessions": 243,
+        "called": 239,
+        "answeredCalls": 360,
+        "calledSolved": 237,
+        "notCalledSolved": 4,
+        "calledWallMs": 25585,
+        "notCalledWallMs": 65747,
+        "taskTypes": [
+          {
+            "id": "rename-function",
+            "sessions": 27,
+            "called": 27
+          },
+          {
+            "id": "rename-shared-function",
+            "sessions": 18,
+            "called": 18
+          },
+          {
+            "id": "rename-variant",
+            "sessions": 27,
+            "called": 27
+          },
+          {
+            "id": "rename-field",
+            "sessions": 24,
+            "called": 24
+          },
+          {
+            "id": "rename-module",
+            "sessions": 27,
+            "called": 27
+          },
+          {
+            "id": "add-variant",
+            "sessions": 21,
+            "called": 21
+          },
+          {
+            "id": "rename-type",
+            "sessions": 27,
+            "called": 27
+          },
+          {
+            "id": "move-function",
+            "sessions": 24,
+            "called": 24
+          },
+          {
+            "id": "remove-variant",
+            "sessions": 27,
+            "called": 26
+          },
+          {
+            "id": "remove-field",
+            "sessions": 21,
+            "called": 18
+          }
+        ],
+        "tools": [
+          {
+            "tool": "elm_rename_function",
+            "calls": 46
+          },
+          {
+            "tool": "elm_rename_field",
+            "calls": 31
+          },
+          {
+            "tool": "elm_rename_variant",
+            "calls": 31
+          },
+          {
+            "tool": "elm_prepare_remove_variant",
+            "calls": 30
+          },
+          {
+            "tool": "elm_rename_type",
+            "calls": 30
+          },
+          {
+            "tool": "elm_add_variant",
+            "calls": 24
+          },
+          {
+            "tool": "elm_move_function",
+            "calls": 24
+          },
+          {
+            "tool": "elm_remove_variant",
+            "calls": 23
+          },
+          {
+            "tool": "elm_rename_file",
+            "calls": 23
+          },
+          {
+            "tool": "elm_diagnostics",
+            "calls": 18
+          },
+          {
+            "tool": "elm_prepare_add_variant",
+            "calls": 18
+          },
+          {
+            "tool": "elm_prepare_remove_field",
+            "calls": 18
+          },
+          {
+            "tool": "elm_references",
+            "calls": 15
+          },
+          {
+            "tool": "elm_remove_field",
+            "calls": 13
+          },
+          {
+            "tool": "elm_symbols",
+            "calls": 12
+          },
+          {
+            "tool": "elm_move_file",
+            "calls": 4
+          }
+        ]
+      },
+      "failures": [
+        {
+          "id": "does-not-compile",
+          "title": "Does not compile",
+          "baseline": 1,
+          "lsp": 0,
+          "calledServer": 0,
+          "notCalledServer": 0
+        },
+        {
+          "id": "inside-string",
+          "title": "Changed a string literal",
+          "baseline": 6,
+          "lsp": 2,
+          "calledServer": 2,
+          "notCalledServer": 0
+        },
+        {
+          "id": "imports",
+          "title": "Changed the imports or the module line beyond the task",
+          "baseline": 3,
+          "lsp": 0,
+          "calledServer": 0,
+          "notCalledServer": 0
+        },
+        {
+          "id": "removal-differs",
+          "title": "Left the code otherwise than the removal makes it",
+          "baseline": 3,
+          "lsp": 0,
+          "calledServer": 0,
+          "notCalledServer": 0
+        },
+        {
+          "id": "branch-not-todo",
+          "title": "Wrote a branch that is not a Debug.todo",
+          "baseline": 2,
+          "lsp": 0,
+          "calledServer": 0,
+          "notCalledServer": 0
+        }
+      ]
+    },
+    {
+      "name": "gpt-6.2-sol in Codex CLI",
+      "coverage": {
+        "planned": 81,
+        "rounds": [
+          {
+            "rounds": 3,
+            "tasks": 81
+          }
+        ]
+      },
+      "setup": {
+        "agent": "Codex CLI 0.171.0",
+        "languageServers": [
+          "0.3.39 (1b4c832ffd09555c1200b217c4f7475d45d8944c), built 2026-11-24 22:13 UTC"
+        ],
+        "recorded": true,
+        "timeoutMin": 20,
+        "maxBudgetUsd": null,
+        "maxTokens": null,
+        "benchmark": "5b607b0252663b70a2d9e616fd88c1fdae5c5cde"
+      },
+      "model": "gpt-6.2-sol",
+      "harness": "Codex CLI",
+      "costReported": false,
+      "solved": {
+        "baseline": {
+          "solved": 233,
+          "sessions": 243
+        },
+        "lsp": {
+          "solved": 238,
+          "sessions": 243
+        }
+      },
+      "savings": {
+        "pairs": 243,
+        "wallMs": {
+          "pairs": 243,
+          "baseline": 9803525,
+          "lsp": 9838900,
+          "savedPercent": -0.36083959596165666,
+          "tasks": 81,
+          "interval": [
+            -6.968311669991262,
+            5.336092275984722
+          ]
+        },
+        "costUsd": null,
+        "inputTokens": {
+          "pairs": 243,
+          "baseline": 18541537,
+          "lsp": 20543447,
+          "savedPercent": -10.796893482994426,
+          "tasks": 81,
+          "interval": [
+            -19.228061753511028,
+            -2.704141946319283
+          ]
+        },
+        "outputTokens": {
+          "pairs": 243,
+          "baseline": 271107,
+          "lsp": 234297,
+          "savedPercent": 13.577664907213757,
+          "tasks": 81,
+          "interval": [
+            7.098306298626639,
+            19.783423485112614
+          ]
+        },
+        "solved": {
+          "both": 231,
+          "baselineOnly": 2,
+          "lspOnly": 7,
+          "neither": 3,
+          "tasks": {
+            "baselineMore": 2,
+            "lspMore": 5,
+            "tied": 74
+          },
+          "signP": 0.4531250000000003
+        }
+      },
+      "activity": {
+        "baseline": {
+          "sessions": 243,
+          "toolCalls": {
+            "mean": 5.082304526748971,
+            "median": 4
+          },
+          "replies": {
+            "mean": 2.0041152263374484,
+            "median": 2
+          },
+          "outputTokens": {
+            "mean": 1115.6666666666667,
+            "median": 1007
+          },
+          "withoutTokens": 0,
+          "tools": [
+            {
+              "tool": "language server",
+              "calls": 0,
+              "perSession": 0
+            },
+            {
+              "tool": "command_execution",
+              "calls": 1184,
+              "perSession": 4.872427983539095
+            },
+            {
+              "tool": "file_change",
+              "calls": 51,
+              "perSession": 0.20987654320987653
+            }
+          ]
+        },
+        "lsp": {
+          "sessions": 243,
+          "toolCalls": {
+            "mean": 4.7818930041152266,
+            "median": 4
+          },
+          "replies": {
+            "mean": 2.0123456790123457,
+            "median": 2
+          },
+          "outputTokens": {
+            "mean": 964.1851851851852,
+            "median": 913
+          },
+          "withoutTokens": 0,
+          "tools": [
+            {
+              "tool": "language server",
+              "calls": 128,
+              "perSession": 0.5267489711934157
+            },
+            {
+              "tool": "command_execution",
+              "calls": 1015,
+              "perSession": 4.176954732510288
+            },
+            {
+              "tool": "file_change",
+              "calls": 19,
+              "perSession": 0.07818930041152264
+            }
+          ]
+        }
+      },
+      "serverUse": {
+        "sessions": 243,
+        "called": 115,
+        "answeredCalls": 126,
+        "calledSolved": 114,
+        "notCalledSolved": 124,
+        "calledWallMs": 33732,
+        "notCalledWallMs": 36173.5,
+        "taskTypes": [
+          {
+            "id": "rename-function",
+            "sessions": 27,
+            "called": 9
+          },
+          {
+            "id": "rename-shared-function",
+            "sessions": 18,
+            "called": 12
+          },
+          {
+            "id": "rename-variant",
+            "sessions": 27,
+            "called": 12
+          },
+          {
+            "id": "rename-field",
+            "sessions": 24,
+            "called": 21
+          },
+          {
+            "id": "rename-module",
+            "sessions": 27,
+            "called": 2
+          },
+          {
+            "id": "add-variant",
+            "sessions": 21,
+            "called": 3
+          },
+          {
+            "id": "rename-type",
+            "sessions": 27,
+            "called": 19
+          },
+          {
+            "id": "move-function",
+            "sessions": 24,
+            "called": 13
+          },
+          {
+            "id": "remove-variant",
+            "sessions": 27,
+            "called": 21
+          },
+          {
+            "id": "remove-field",
+            "sessions": 21,
+            "called": 3
+          }
+        ],
+        "tools": [
+          {
+            "tool": "elm_rename_field",
+            "calls": 22
+          },
+          {
+            "tool": "elm_remove_variant",
+            "calls": 21
+          },
+          {
+            "tool": "elm_rename_function",
+            "calls": 21
+          },
+          {
+            "tool": "elm_rename_type",
+            "calls": 19
+          },
+          {
+            "tool": "elm_move_function",
+            "calls": 13
+          },
+          {
+            "tool": "elm_rename_variant",
+            "calls": 12
+          },
+          {
+            "tool": "elm_prepare_remove_variant",
+            "calls": 8
+          },
+          {
+            "tool": "elm_add_variant",
+            "calls": 4
+          },
+          {
+            "tool": "elm_remove_field",
+            "calls": 3
+          },
+          {
+            "tool": "elm_prepare_add_variant",
+            "calls": 2
+          },
+          {
+            "tool": "elm_rename_file",
+            "calls": 2
+          },
+          {
+            "tool": "elm_prepare_remove_field",
+            "calls": 1
+          }
+        ]
+      },
+      "failures": [
+        {
+          "id": "inside-string",
+          "title": "Changed a string literal",
+          "baseline": 7,
+          "lsp": 3,
+          "calledServer": 1,
+          "notCalledServer": 2
+        },
+        {
+          "id": "removal-differs",
+          "title": "Left the code otherwise than the removal makes it",
+          "baseline": 0,
+          "lsp": 1,
+          "calledServer": 0,
+          "notCalledServer": 1
+        },
+        {
+          "id": "non-elm-file",
+          "title": "Changed a file that is no Elm source",
+          "baseline": 3,
+          "lsp": 1,
+          "calledServer": 0,
+          "notCalledServer": 1
+        }
+      ]
+    },
+    {
+      "name": "gpt-6.1-terra in Codex CLI",
+      "coverage": {
+        "planned": 81,
+        "rounds": [
+          {
+            "rounds": 2,
+            "tasks": 77
+          },
+          {
+            "rounds": 3,
+            "tasks": 4
+          }
+        ]
+      },
+      "setup": {
+        "agent": "Codex CLI 0.171.0",
+        "languageServers": [
+          "0.3.39 (1b4c832ffd09555c1200b217c4f7475d45d8944c), built 2026-11-24 22:13 UTC"
+        ],
+        "recorded": true,
+        "timeoutMin": 20,
+        "maxBudgetUsd": null,
+        "maxTokens": null,
+        "benchmark": "5b607b0252663b70a2d9e616fd88c1fdae5c5cde"
+      },
+      "model": "gpt-6.1-terra",
+      "harness": "Codex CLI",
+      "costReported": false,
+      "solved": {
+        "baseline": {
+          "solved": 160,
+          "sessions": 166
+        },
+        "lsp": {
+          "solved": 165,
+          "sessions": 166
+        }
+      },
+      "savings": {
+        "pairs": 166,
+        "wallMs": {
+          "pairs": 166,
+          "baseline": 11554266,
+          "lsp": 10966295,
+          "savedPercent": 5.088778465027549,
+          "tasks": 81,
+          "interval": [
+            1.8416148193444657,
+            8.521369684435331
+          ]
+        },
+        "costUsd": null,
+        "inputTokens": {
+          "pairs": 166,
+          "baseline": 11883975,
+          "lsp": 10338578,
+          "savedPercent": 13.00404115626295,
+          "tasks": 81,
+          "interval": [
+            0.47776596723047954,
+            24.386906834910945
+          ]
+        },
+        "outputTokens": {
+          "pairs": 166,
+          "baseline": 205646,
+          "lsp": 152364,
+          "savedPercent": 25.909572760958152,
+          "tasks": 81,
+          "interval": [
+            18.126009140003475,
+            33.04060564612906
+          ]
+        },
+        "solved": {
+          "both": 160,
+          "baselineOnly": 0,
+          "lspOnly": 5,
+          "neither": 1,
+          "tasks": {
+            "baselineMore": 0,
+            "lspMore": 4,
+            "tied": 77
+          },
+          "signP": 0.125
+        }
+      },
+      "activity": {
+        "baseline": {
+          "sessions": 166,
+          "toolCalls": {
+            "mean": 4.740963855421687,
+            "median": 4
+          },
+          "replies": {
+            "mean": 2.7409638554216866,
+            "median": 3
+          },
+          "outputTokens": {
+            "mean": 1238.8313253012047,
+            "median": 1156.5
+          },
+          "withoutTokens": 0,
+          "tools": [
+            {
+              "tool": "language server",
+              "calls": 0,
+              "perSession": 0
+            },
+            {
+              "tool": "command_execution",
+              "calls": 764,
+              "perSession": 4.602409638554217
+            },
+            {
+              "tool": "file_change",
+              "calls": 23,
+              "perSession": 0.13855421686746988
+            }
+          ]
+        },
+        "lsp": {
+          "sessions": 166,
+          "toolCalls": {
+            "mean": 4.265060240963855,
+            "median": 4
+          },
+          "replies": {
+            "mean": 2.63855421686747,
+            "median": 3
+          },
+          "outputTokens": {
+            "mean": 917.855421686747,
+            "median": 836
+          },
+          "withoutTokens": 0,
+          "tools": [
+            {
+              "tool": "language server",
+              "calls": 194,
+              "perSession": 1.1686746987951808
+            },
+            {
+              "tool": "command_execution",
+              "calls": 514,
+              "perSession": 3.0963855421686746
+            },
+            {
+              "tool": "file_change",
+              "calls": 0,
+              "perSession": 0
+            }
+          ]
+        }
+      },
+      "serverUse": {
+        "sessions": 166,
+        "called": 152,
+        "answeredCalls": 189,
+        "calledSolved": 151,
+        "notCalledSolved": 14,
+        "calledWallMs": 64737,
+        "notCalledWallMs": 66140.5,
+        "taskTypes": [
+          {
+            "id": "rename-function",
+            "sessions": 21,
+            "called": 15
+          },
+          {
+            "id": "rename-shared-function",
+            "sessions": 13,
+            "called": 13
+          },
+          {
+            "id": "rename-variant",
+            "sessions": 18,
+            "called": 18
+          },
+          {
+            "id": "rename-field",
+            "sessions": 16,
+            "called": 16
+          },
+          {
+            "id": "rename-module",
+            "sessions": 18,
+            "called": 11
+          },
+          {
+            "id": "add-variant",
+            "sessions": 14,
+            "called": 14
+          },
+          {
+            "id": "rename-type",
+            "sessions": 18,
+            "called": 18
+          },
+          {
+            "id": "move-function",
+            "sessions": 16,
+            "called": 16
+          },
+          {
+            "id": "remove-variant",
+            "sessions": 18,
+            "called": 18
+          },
+          {
+            "id": "remove-field",
+            "sessions": 14,
+            "called": 13
+          }
+        ],
+        "tools": [
+          {
+            "tool": "elm_rename_function",
+            "calls": 28
+          },
+          {
+            "tool": "elm_prepare_remove_variant",
+            "calls": 20
+          },
+          {
+            "tool": "elm_rename_type",
+            "calls": 19
+          },
+          {
+            "tool": "elm_remove_variant",
+            "calls": 18
+          },
+          {
+            "tool": "elm_rename_variant",
+            "calls": 18
+          },
+          {
+            "tool": "elm_move_function",
+            "calls": 16
+          },
+          {
+            "tool": "elm_rename_field",
+            "calls": 16
+          },
+          {
+            "tool": "elm_add_variant",
+            "calls": 14
+          },
+          {
+            "tool": "elm_prepare_add_variant",
+            "calls": 14
+          },
+          {
+            "tool": "elm_remove_field",
+            "calls": 13
+          },
+          {
+            "tool": "elm_rename_file",
+            "calls": 11
+          },
+          {
+            "tool": "elm_prepare_remove_field",
+            "calls": 7
+          }
+        ]
+      },
+      "failures": [
+        {
+          "id": "inside-string",
+          "title": "Changed a string literal",
+          "baseline": 5,
+          "lsp": 1,
+          "calledServer": 1,
+          "notCalledServer": 0
+        },
+        {
+          "id": "removal-differs",
+          "title": "Left the code otherwise than the removal makes it",
+          "baseline": 1,
+          "lsp": 0,
+          "calledServer": 0,
+          "notCalledServer": 0
+        }
+      ]
+    },
+    {
+      "name": "gemini-4-neon in Antigravity CLI",
+      "coverage": {
+        "planned": 81,
+        "rounds": [
+          {
+            "rounds": 2,
+            "tasks": 73
+          },
+          {
+            "rounds": 3,
+            "tasks": 8
+          }
+        ]
+      },
+      "setup": {
+        "agent": "Antigravity CLI 1.5.13",
+        "languageServers": [
+          "0.3.39 (1b4c832ffd09555c1200b217c4f7475d45d8944c), built 2026-11-24 22:13 UTC"
+        ],
+        "recorded": true,
+        "timeoutMin": 20,
+        "maxBudgetUsd": null,
+        "maxTokens": null,
+        "benchmark": "5b607b0252663b70a2d9e616fd88c1fdae5c5cde"
+      },
+      "model": "gemini-4-neon",
+      "harness": "Antigravity CLI",
+      "costReported": false,
+      "solved": {
+        "baseline": {
+          "solved": 170,
+          "sessions": 170
+        },
+        "lsp": {
+          "solved": 170,
+          "sessions": 170
+        }
+      },
+      "savings": {
+        "pairs": 170,
+        "wallMs": {
+          "pairs": 170,
+          "baseline": 33874272,
+          "lsp": 14278686,
+          "savedPercent": 57.8479915376484,
+          "tasks": 81,
+          "interval": [
+            54.77223994064396,
+            60.711658958353446
+          ]
+        },
+        "costUsd": null,
+        "inputTokens": {
+          "pairs": 170,
+          "baseline": 81088420,
+          "lsp": 20321531,
+          "savedPercent": 74.93904678374545,
+          "tasks": 81,
+          "interval": [
+            73.20656417059129,
+            76.61380098018726
+          ]
+        },
+        "outputTokens": {
+          "pairs": 170,
+          "baseline": 2018043,
+          "lsp": 723436,
+          "savedPercent": 64.15160628390971,
+          "tasks": 81,
+          "interval": [
+            61.9690074959988,
+            66.1811150271687
+          ]
+        },
+        "solved": {
+          "both": 170,
+          "baselineOnly": 0,
+          "lspOnly": 0,
+          "neither": 0,
+          "tasks": {
+            "baselineMore": 0,
+            "lspMore": 0,
+            "tied": 81
+          },
+          "signP": 1
+        }
+      },
+      "activity": {
+        "baseline": {
+          "sessions": 170,
+          "toolCalls": {
+            "mean": 39.370588235294115,
+            "median": 36
+          },
+          "replies": {
+            "mean": 16.064705882352943,
+            "median": 15
+          },
+          "outputTokens": {
+            "mean": 11870.841176470589,
+            "median": 11144.5
+          },
+          "withoutTokens": 0,
+          "tools": [
+            {
+              "tool": "language server",
+              "calls": 0,
+              "perSession": 0
+            },
+            {
+              "tool": "run_command",
+              "calls": 2012,
+              "perSession": 11.83529411764706
+            },
+            {
+              "tool": "read_file",
+              "calls": 2161,
+              "perSession": 12.711764705882352
+            },
+            {
+              "tool": "edit_file",
+              "calls": 2520,
+              "perSession": 14.823529411764707
+            }
+          ]
+        },
+        "lsp": {
+          "sessions": 170,
+          "toolCalls": {
+            "mean": 12.705882352941176,
+            "median": 12
+          },
+          "replies": {
+            "mean": 7.764705882352941,
+            "median": 7
+          },
+          "outputTokens": {
+            "mean": 4255.505882352942,
+            "median": 4142.5
+          },
+          "withoutTokens": 0,
+          "tools": [
+            {
+              "tool": "language server",
+              "calls": 276,
+              "perSession": 1.6235294117647059
+            },
+            {
+              "tool": "run_command",
+              "calls": 1019,
+              "perSession": 5.9941176470588236
+            },
+            {
+              "tool": "read_file",
+              "calls": 863,
+              "perSession": 5.076470588235294
+            },
+            {
+              "tool": "edit_file",
+              "calls": 2,
+              "perSession": 0.011764705882352941
+            }
+          ]
+        }
+      },
+      "serverUse": {
+        "sessions": 170,
+        "called": 170,
+        "answeredCalls": 276,
+        "calledSolved": 170,
+        "notCalledSolved": 0,
+        "calledWallMs": 79662,
+        "notCalledWallMs": null,
+        "taskTypes": [
+          {
+            "id": "rename-function",
+            "sessions": 21,
+            "called": 21
+          },
+          {
+            "id": "rename-shared-function",
+            "sessions": 14,
+            "called": 14
+          },
+          {
+            "id": "rename-variant",
+            "sessions": 21,
+            "called": 21
+          },
+          {
+            "id": "rename-field",
+            "sessions": 16,
+            "called": 16
+          },
+          {
+            "id": "rename-module",
+            "sessions": 18,
+            "called": 18
+          },
+          {
+            "id": "add-variant",
+            "sessions": 14,
+            "called": 14
+          },
+          {
+            "id": "rename-type",
+            "sessions": 18,
+            "called": 18
+          },
+          {
+            "id": "move-function",
+            "sessions": 16,
+            "called": 16
+          },
+          {
+            "id": "remove-variant",
+            "sessions": 18,
+            "called": 18
+          },
+          {
+            "id": "remove-field",
+            "sessions": 14,
+            "called": 14
+          }
+        ],
+        "tools": [
+          {
+            "tool": "elm_references",
+            "calls": 49
+          },
+          {
+            "tool": "elm_rename_function",
+            "calls": 35
+          },
+          {
+            "tool": "elm_rename_variant",
+            "calls": 21
+          },
+          {
+            "tool": "elm_prepare_remove_variant",
+            "calls": 18
+          },
+          {
+            "tool": "elm_remove_variant",
+            "calls": 18
+          },
+          {
+            "tool": "elm_rename_file",
+            "calls": 18
+          },
+          {
+            "tool": "elm_rename_type",
+            "calls": 18
+          },
+          {
+            "tool": "elm_move_function",
+            "calls": 16
+          },
+          {
+            "tool": "elm_rename_field",
+            "calls": 16
+          },
+          {
+            "tool": "elm_add_variant",
+            "calls": 14
+          },
+          {
+            "tool": "elm_prepare_add_variant",
+            "calls": 14
+          },
+          {
+            "tool": "elm_prepare_remove_field",
+            "calls": 14
+          },
+          {
+            "tool": "elm_remove_field",
+            "calls": 14
+          },
+          {
+            "tool": "elm_diagnostics",
+            "calls": 11
+          }
+        ]
+      },
+      "failures": []
+    }
+  ],
+  "differences": {
+    "baseline": [
+      {
+        "runs": [
+          "claude-opus-5-5 in Claude Code",
+          "claude-sonnet-5-5 in Claude Code"
+        ],
+        "rounds": 243,
+        "solved": [
+          237,
+          227
+        ],
+        "tasks": {
+          "firstMore": 11,
+          "secondMore": 1,
+          "tied": 69
+        },
+        "signP": 0.006347656250000012
+      },
+      {
+        "runs": [
+          "claude-opus-5-5 in Claude Code",
+          "claude-haiku-5-5 in Claude Code"
+        ],
+        "rounds": 243,
+        "solved": [
+          237,
+          228
+        ],
+        "tasks": {
+          "firstMore": 8,
+          "secondMore": 2,
+          "tied": 71
+        },
+        "signP": 0.10937500000000017
+      },
+      {
+        "runs": [
+          "claude-opus-5-5 in Claude Code",
+          "gpt-6.2-sol in Codex CLI"
+        ],
+        "rounds": 243,
+        "solved": [
+          237,
+          233
+        ],
+        "tasks": {
+          "firstMore": 5,
+          "secondMore": 2,
+          "tied": 74
+        },
+        "signP": 0.4531250000000003
+      },
+      {
+        "runs": [
+          "claude-opus-5-5 in Claude Code",
+          "gpt-6.1-terra in Codex CLI"
+        ],
+        "rounds": 166,
+        "solved": [
+          162,
+          160
+        ],
+        "tasks": {
+          "firstMore": 4,
+          "secondMore": 2,
+          "tied": 75
+        },
+        "signP": 0.6875000000000006
+      },
+      {
+        "runs": [
+          "claude-opus-5-5 in Claude Code",
+          "gemini-4-neon in Antigravity CLI"
+        ],
+        "rounds": 170,
+        "solved": [
+          166,
+          170
+        ],
+        "tasks": {
+          "firstMore": 0,
+          "secondMore": 4,
+          "tied": 77
+        },
+        "signP": 0.125
+      },
+      {
+        "runs": [
+          "claude-sonnet-5-5 in Claude Code",
+          "claude-haiku-5-5 in Claude Code"
+        ],
+        "rounds": 243,
+        "solved": [
+          227,
+          228
+        ],
+        "tasks": {
+          "firstMore": 5,
+          "secondMore": 8,
+          "tied": 68
+        },
+        "signP": 0.5810546875000012
+      },
+      {
+        "runs": [
+          "claude-sonnet-5-5 in Claude Code",
+          "gpt-6.2-sol in Codex CLI"
+        ],
+        "rounds": 243,
+        "solved": [
+          227,
+          233
+        ],
+        "tasks": {
+          "firstMore": 3,
+          "secondMore": 10,
+          "tied": 68
+        },
+        "signP": 0.09228515625000008
+      },
+      {
+        "runs": [
+          "claude-sonnet-5-5 in Claude Code",
+          "gpt-6.1-terra in Codex CLI"
+        ],
+        "rounds": 166,
+        "solved": [
+          157,
+          160
+        ],
+        "tasks": {
+          "firstMore": 2,
+          "secondMore": 5,
+          "tied": 74
+        },
+        "signP": 0.4531250000000003
+      },
+      {
+        "runs": [
+          "claude-sonnet-5-5 in Claude Code",
+          "gemini-4-neon in Antigravity CLI"
+        ],
+        "rounds": 170,
+        "solved": [
+          161,
+          170
+        ],
+        "tasks": {
+          "firstMore": 0,
+          "secondMore": 7,
+          "tied": 74
+        },
+        "signP": 0.015625000000000003
+      },
+      {
+        "runs": [
+          "claude-haiku-5-5 in Claude Code",
+          "gpt-6.2-sol in Codex CLI"
+        ],
+        "rounds": 243,
+        "solved": [
+          228,
+          233
+        ],
+        "tasks": {
+          "firstMore": 3,
+          "secondMore": 6,
+          "tied": 72
+        },
+        "signP": 0.5078125000000007
+      },
+      {
+        "runs": [
+          "claude-haiku-5-5 in Claude Code",
+          "gpt-6.1-terra in Codex CLI"
+        ],
+        "rounds": 166,
+        "solved": [
+          155,
+          160
+        ],
+        "tasks": {
+          "firstMore": 1,
+          "secondMore": 5,
+          "tied": 75
+        },
+        "signP": 0.21875000000000017
+      },
+      {
+        "runs": [
+          "claude-haiku-5-5 in Claude Code",
+          "gemini-4-neon in Antigravity CLI"
+        ],
+        "rounds": 170,
+        "solved": [
+          159,
+          170
+        ],
+        "tasks": {
+          "firstMore": 0,
+          "secondMore": 8,
+          "tied": 73
+        },
+        "signP": 0.007812500000000002
+      },
+      {
+        "runs": [
+          "gpt-6.2-sol in Codex CLI",
+          "gpt-6.1-terra in Codex CLI"
+        ],
+        "rounds": 166,
+        "solved": [
+          159,
+          160
+        ],
+        "tasks": {
+          "firstMore": 2,
+          "secondMore": 3,
+          "tied": 76
+        },
+        "signP": 1
+      },
+      {
+        "runs": [
+          "gpt-6.2-sol in Codex CLI",
+          "gemini-4-neon in Antigravity CLI"
+        ],
+        "rounds": 170,
+        "solved": [
+          163,
+          170
+        ],
+        "tasks": {
+          "firstMore": 0,
+          "secondMore": 5,
+          "tied": 76
+        },
+        "signP": 0.0625
+      },
+      {
+        "runs": [
+          "gpt-6.1-terra in Codex CLI",
+          "gemini-4-neon in Antigravity CLI"
+        ],
+        "rounds": 166,
+        "solved": [
+          160,
+          166
+        ],
+        "tasks": {
+          "firstMore": 0,
+          "secondMore": 4,
+          "tied": 77
+        },
+        "signP": 0.125
+      }
+    ],
+    "lsp": [
+      {
+        "runs": [
+          "claude-opus-5-5 in Claude Code",
+          "claude-sonnet-5-5 in Claude Code"
+        ],
+        "rounds": 243,
+        "solved": [
+          243,
+          242
+        ],
+        "tasks": {
+          "firstMore": 1,
+          "secondMore": 0,
+          "tied": 80
+        },
+        "signP": 1
+      },
+      {
+        "runs": [
+          "claude-opus-5-5 in Claude Code",
+          "claude-haiku-5-5 in Claude Code"
+        ],
+        "rounds": 243,
+        "solved": [
+          243,
+          241
+        ],
+        "tasks": {
+          "firstMore": 1,
+          "secondMore": 0,
+          "tied": 80
+        },
+        "signP": 1
+      },
+      {
+        "runs": [
+          "claude-opus-5-5 in Claude Code",
+          "gpt-6.2-sol in Codex CLI"
+        ],
+        "rounds": 243,
+        "solved": [
+          243,
+          238
+        ],
+        "tasks": {
+          "firstMore": 5,
+          "secondMore": 0,
+          "tied": 76
+        },
+        "signP": 0.0625
+      },
+      {
+        "runs": [
+          "claude-opus-5-5 in Claude Code",
+          "gpt-6.1-terra in Codex CLI"
+        ],
+        "rounds": 166,
+        "solved": [
+          166,
+          165
+        ],
+        "tasks": {
+          "firstMore": 1,
+          "secondMore": 0,
+          "tied": 80
+        },
+        "signP": 1
+      },
+      {
+        "runs": [
+          "claude-opus-5-5 in Claude Code",
+          "gemini-4-neon in Antigravity CLI"
+        ],
+        "rounds": 170,
+        "solved": [
+          170,
+          170
+        ],
+        "tasks": {
+          "firstMore": 0,
+          "secondMore": 0,
+          "tied": 81
+        },
+        "signP": 1
+      },
+      {
+        "runs": [
+          "claude-sonnet-5-5 in Claude Code",
+          "claude-haiku-5-5 in Claude Code"
+        ],
+        "rounds": 243,
+        "solved": [
+          242,
+          241
+        ],
+        "tasks": {
+          "firstMore": 1,
+          "secondMore": 0,
+          "tied": 80
+        },
+        "signP": 1
+      },
+      {
+        "runs": [
+          "claude-sonnet-5-5 in Claude Code",
+          "gpt-6.2-sol in Codex CLI"
+        ],
+        "rounds": 243,
+        "solved": [
+          242,
+          238
+        ],
+        "tasks": {
+          "firstMore": 4,
+          "secondMore": 0,
+          "tied": 77
+        },
+        "signP": 0.125
+      },
+      {
+        "runs": [
+          "claude-sonnet-5-5 in Claude Code",
+          "gpt-6.1-terra in Codex CLI"
+        ],
+        "rounds": 166,
+        "solved": [
+          165,
+          165
+        ],
+        "tasks": {
+          "firstMore": 1,
+          "secondMore": 1,
+          "tied": 79
+        },
+        "signP": 1
+      },
+      {
+        "runs": [
+          "claude-sonnet-5-5 in Claude Code",
+          "gemini-4-neon in Antigravity CLI"
+        ],
+        "rounds": 170,
+        "solved": [
+          169,
+          170
+        ],
+        "tasks": {
+          "firstMore": 0,
+          "secondMore": 1,
+          "tied": 80
+        },
+        "signP": 1
+      },
+      {
+        "runs": [
+          "claude-haiku-5-5 in Claude Code",
+          "gpt-6.2-sol in Codex CLI"
+        ],
+        "rounds": 243,
+        "solved": [
+          241,
+          238
+        ],
+        "tasks": {
+          "firstMore": 4,
+          "secondMore": 1,
+          "tied": 76
+        },
+        "signP": 0.37500000000000006
+      },
+      {
+        "runs": [
+          "claude-haiku-5-5 in Claude Code",
+          "gpt-6.1-terra in Codex CLI"
+        ],
+        "rounds": 166,
+        "solved": [
+          165,
+          165
+        ],
+        "tasks": {
+          "firstMore": 1,
+          "secondMore": 1,
+          "tied": 79
+        },
+        "signP": 1
+      },
+      {
+        "runs": [
+          "claude-haiku-5-5 in Claude Code",
+          "gemini-4-neon in Antigravity CLI"
+        ],
+        "rounds": 170,
+        "solved": [
+          169,
+          170
+        ],
+        "tasks": {
+          "firstMore": 0,
+          "secondMore": 1,
+          "tied": 80
+        },
+        "signP": 1
+      },
+      {
+        "runs": [
+          "gpt-6.2-sol in Codex CLI",
+          "gpt-6.1-terra in Codex CLI"
+        ],
+        "rounds": 166,
+        "solved": [
+          162,
+          165
+        ],
+        "tasks": {
+          "firstMore": 0,
+          "secondMore": 3,
+          "tied": 78
+        },
+        "signP": 0.25000000000000006
+      },
+      {
+        "runs": [
+          "gpt-6.2-sol in Codex CLI",
+          "gemini-4-neon in Antigravity CLI"
+        ],
+        "rounds": 170,
+        "solved": [
+          166,
+          170
+        ],
+        "tasks": {
+          "firstMore": 0,
+          "secondMore": 4,
+          "tied": 77
+        },
+        "signP": 0.125
+      },
+      {
+        "runs": [
+          "gpt-6.1-terra in Codex CLI",
+          "gemini-4-neon in Antigravity CLI"
+        ],
+        "rounds": 166,
+        "solved": [
+          165,
+          166
+        ],
+        "tasks": {
+          "firstMore": 0,
+          "secondMore": 1,
+          "tied": 80
+        },
+        "signP": 1
+      }
+    ]
+  }
+}

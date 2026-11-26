@@ -1,0 +1,32 @@
+{
+  "claude-opus-5-5": [
+    "Without the server, Opus refactors with shell scripts, and 5.4 of its 7.8 tool calls per session are shell commands. Those scripts run fast, and they replace text without telling a type's name from a string literal that holds it. Three of its six failures come from that. The other three moved the function as asked and also rewrote the source module's exposing (..) into a list of the same names, which the task forbids.",
+    "With the server, one call performs the edit. A session drops from a median of 12 replies to 8 and writes 38 percent fewer output tokens, which cuts time by 29 percent and cost by 32 percent. The gap is widest when Opus adds a variant, 101 seconds without the server against 38 seconds with it, because without the server Opus finds every case expression itself.",
+    "Opus saves the least of the three Claude models because its sessions without the server already take few steps."
+  ],
+  "claude-sonnet-5-5": [
+    "Without the server, Sonnet works with shell scripts like Opus, and 5.3 of its 7.3 tool calls per session are shell commands. It fails 16 of 243 sessions, and its failures grow with the size of the target. Seven failures change a string literal, four leave the code otherwise than a removal makes it, four change more than the task names, and one leaves the requested change missing.",
+    "With the server, a session drops from a median of 11 replies to 7 and writes 58 percent fewer output tokens. Sonnet fails one session with the server, a type rename where it called the rename tool, saw the type's name left in string literals, and replaced those literals itself.",
+    "Sonnet calls the server in 10 of its 21 field removal sessions and solves the rest without it."
+  ],
+  "claude-haiku-5-5": [
+    "Without the server, Haiku edits file by file. It averages 6.9 edits, 4.2 reads and 18.0 tool calls per session, with a median of 25 replies. The server does those edits in one call, which brings Haiku down to 7.4 tool calls per session and a median of 13 replies.",
+    "Haiku saves the most of the three Claude models, 47 percent of time and 52 percent of cost, because it has the most steps to cut.",
+    "Both of Haiku's failures with the server happen on a type rename where it called the rename tool and then replaced the type's name inside string literals itself."
+  ],
+  "gpt-6.2-sol": [
+    "Sol finishes a task in a median of 2 replies, with 4.9 shell commands per session without the server and 4.2 with it. A session that short has little time left to save, so total time does not change. Input tokens grow by 11 percent because the prompt carries the descriptions of the server's 22 tools.",
+    "Sol calls the server in under half of its sessions. It calls the server often for field renames, variant removals and type renames, and rarely for module renames, added variants and field removals. Where Sol skips the server, it searches and edits text on its own.",
+    "Sessions that called the server solved their task in all but one case. Most of Sol's failures with the server come from sessions that did not call it. Without the server, three failures changed an HTML file outside the Elm project that holds the function's name."
+  ],
+  "gpt-6.1-terra": [
+    "I stopped this run after two of its three rounds, so it rests on 166 pairs of sessions.",
+    "Terra calls the server in 152 of 166 sessions and saves 5 percent of time. A Terra session takes about 65 seconds across every kind of task in both arms, so most of the time belongs to the model itself rather than the work a tool can take over. With the server, Terra writes 26 percent fewer output tokens.",
+    "Five of Terra's six failures without the server change a string literal, including one inside a sentence that the application shows its users."
+  ],
+  "gemini-4-neon": [
+    "I stopped this run after two of its three rounds, so it rests on 170 pairs of sessions.",
+    "Without the server, Neon works in many small steps, averaging 39.4 tool calls per session, with 14.8 edits, 12.7 reads and 11.8 shell commands. Antigravity runs a second model to review each edit and each command before it executes, which adds delay to every step. A session takes a median of 178 seconds.",
+    "With the server, Neon averages 12.7 tool calls per session and makes 2 edits of its own across all 170 sessions, and a session takes a median of 80 seconds. Neon reads 75 percent fewer input tokens. It called the server in every session that had it and solved every task in both arms, so the server changes time and tokens rather than the solve rate."
+  ]
+}
