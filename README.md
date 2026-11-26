@@ -279,7 +279,7 @@ Tests cover: definition, references, symbols, rename (functions, types, variants
 
 ## Benchmark
 
-`benchmarks/` measures what the tools are worth to an agent. It gives Claude Code the same Elm refactorings with the language server and without it, on codebases you choose, and compares how often the result is right, what it costs and how long it takes. See [benchmarks/README.md](benchmarks/README.md).
+`benchmarks/` measures what the tools are worth to an agent and tests the tools directly on real codebases. It plans ten kinds of Elm refactoring across target sizes with `--levels`, widens check commands with `entries`, runs a tool-only pass with `probe` without starting an agent, and gives Claude Code the same tasks with the language server and without it to compare solve rate, cost and time. See [benchmarks/README.md](benchmarks/README.md).
 
 ## Related
 

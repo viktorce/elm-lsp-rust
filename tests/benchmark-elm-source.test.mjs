@@ -6,7 +6,23 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { codeOnly, headerLine, literalLineStarts, scanSource, tokensOf, withVariant } from "../benchmarks/lib/elm-source.mjs";
+import {
+  codeOnly,
+  commentsAbove,
+  declarationLines,
+  declaredAt,
+  headerLine,
+  literalLineStarts,
+  modulesByQualifier,
+  namesUsed,
+  rewriteNames,
+  scanSource,
+  tokensOf,
+  withExposing,
+  withImport,
+  withImportExposing,
+  withVariant,
+} from "../benchmarks/lib/elm-source.mjs";
 import { SHAPES, SPREAD } from "./benchmark-support.mjs";
 
 test("a source file is read for its module, imports, functions, variants and fields", () => {
@@ -17,7 +33,11 @@ test("a source file is read for its module, imports, functions, variants and fie
     imports: ["Json.Decode", "Html"],
     functions: ["area"],
     exposedFunctions: ["area"],
+    values: ["area"],
+    exposedValues: ["area"],
     typeNames: ["Shape", "Point", "Id"],
+    // Id is the module's own
+    exposedTypes: ["Shape", "Point"],
     openFields: [],
     // The fields of Polygon's record argument are not variants
     types: [{ name: "Shape", variants: ["Circle", "Polygon", "Dot"], open: true }],
@@ -81,7 +101,10 @@ test("a name in letters outside ASCII is read whole", () => {
     imports: ["Données.Clés"],
     functions: ["libellé"],
     exposedFunctions: ["libellé"],
+    values: ["libellé"],
+    exposedValues: ["libellé"],
     typeNames: ["État", "Réservation"],
+    exposedTypes: ["État", "Réservation"],
     openFields: ["durée"],
     types: [{ name: "État", variants: ["Ouverte", "Fermée"], open: true }],
     aliases: [{ name: "Réservation", fields: ["prénom", "entrée"] }],
@@ -125,7 +148,10 @@ test("a declaration reads the same however it is laid out", () => {
     imports: ["Html"],
     functions: ["area", "hidden"],
     exposedFunctions: ["area"],
+    values: ["area", "hidden"],
+    exposedValues: ["area"],
     typeNames: ["Shape", "Point"],
+    exposedTypes: ["Shape"],
     openFields: [],
     types: [{ name: "Shape", variants: ["Circle", "Dot"], open: true }],
     aliases: [{ name: "Point", fields: ["x", "y"] }],
@@ -232,4 +258,76 @@ test("a variant is appended below the last one, after its wrapped arguments", ()
     assert.equal(withVariant(documented, "Shape", "Dot"), [open, ...example, close, "", "", ...appended].join("\n"), open);
     assert.equal(withVariant([open, ...example, close, ""].join("\n"), "Shape", "Dot"), null, open);
   }
+});
+
+test("a function, a type, a variant and a field are found where their declaration names them", () => {
+  // Each place as the text that stands there
+  const at = (text, named) => {
+    const place = declaredAt(text, named);
+    return place && text.split("\n")[place.line].slice(place.index);
+  };
+  assert.equal(at(SHAPES, { function: "area" }), "area : Shape -> Float");
+  assert.equal(at(SHAPES, { type: "Shape", variant: "Circle" }), "Circle Float");
+  assert.equal(at(SHAPES, { type: "Shape", variant: "Dot" }), "Dot");
+  assert.equal(at(SHAPES, { alias: "Point", field: "y" }), "y : Float");
+  assert.equal(at(SHAPES, { alias: "Point", field: "label" }), "label :");
+  // A custom type and a type alias alike
+  assert.equal(at(SHAPES, { typeName: "Shape" }), "Shape");
+  assert.equal(at(SHAPES, { typeName: "Id" }), "Id =");
+  assert.equal(declaredAt(SHAPES, { typeName: "Dot" }), null);
+  // A field of a record inside the alias is none of the alias's own, and a field is no variant
+  assert.equal(declaredAt(SHAPES, { alias: "Point", field: "text" }), null);
+  assert.equal(declaredAt(SHAPES, { type: "Point", variant: "Dot" }), null);
+  assert.equal(declaredAt(SHAPES, { alias: "Shape", field: "sides" }), null);
+  // However the declaration is spread over lines
+  assert.equal(at(SPREAD, { function: "area" }), "area");
+  assert.equal(at(SPREAD, { type: "Shape", variant: "Dot" }), "Dot");
+  assert.deepEqual([at(SPREAD, { typeName: "Shape" }), at(SPREAD, { typeName: "Point" })], ["Shape", "Point"]);
+  assert.deepEqual(declaredAt(SPREAD, { alias: "Point", field: "y" }), { line: 21, index: 17 });
+  // A declaration in a comment is passed over, and the index counts characters, not bytes
+  const commented = 'module Café exposing (..)\n\n{-| type Shape = Dot -}\ntype Shape = Circle | Dot\n\n\ntype alias Menu =\n    { café : String, thé : String }\n';
+  assert.deepEqual(declaredAt(commented, { type: "Shape", variant: "Dot" }), { line: 3, index: 22 });
+  assert.deepEqual(declaredAt(commented, { alias: "Menu", field: "thé" }), { line: 7, index: 21 });
+  assert.deepEqual(declaredAt(commented, { typeName: "Shape" }), { line: 3, index: 5 });
+});
+
+test("the names that code uses are found with their qualifiers, and a field's label, a comment and a string are none", () => {
+  const text = 'view : Model -> Html.Html msg\nview model =\n    -- div here\n    Html.Attributes.div { class = model.title, Page.Home.id = 1 } [ text "class" ] .label\n';
+  assert.deepEqual(
+    namesUsed(text).map(({ qualifier, name }) => (qualifier ? `${qualifier}.${name}` : name)),
+    ["view", "Model", "Html.Html", "msg", "view", "model", "Html.Attributes.div", "model", "Page.Home.id", "text"]
+  );
+  // Rewritten in place, with the rest as it was
+  assert.equal(
+    rewriteNames(text, ({ qualifier, name }) => (qualifier === "Html.Attributes" ? `Attr.${name}` : name === "text" ? "Html.text" : undefined)).split("\n")[3],
+    '    Attr.div { class = model.title, Page.Home.id = 1 } [ Html.text "class" ] .label'
+  );
+  // The default imports stand under their qualifiers, unless the module imports one of them itself
+  const qualifiers = modulesByQualifier(scanSource("src/A.elm", "module A exposing (a)\n\nimport Html as H\nimport Html.Attributes as H\nimport Maybe as M\n"));
+  assert.deepEqual([qualifiers.get("H"), qualifiers.get("Cmd"), qualifiers.get("M"), qualifiers.get("Maybe")], [["Html", "Html.Attributes"], ["Platform.Cmd"], ["Maybe"], undefined]);
+});
+
+test("a declaration's lines are found with the comment above them, also one with blank lines in it", () => {
+  const lines = ["module A exposing (a)", "", "", "{-| The one.", "", "It has a blank line.", "", "-}", "a : Int", "a =", "    1", "", "-- next", "", "", "b = a -- a"];
+  const text = lines.join("\n");
+  assert.deepEqual(declarationLines(text, "a"), [{ from: 8, to: 9 }, { from: 9, to: 11 }]);
+  assert.equal(commentsAbove(text, 8), 3);
+  // A blank line stands between b and the comment above it, and a comment behind code is that code's own
+  assert.equal(commentsAbove(text, 15), 15);
+  assert.equal(commentsAbove("x = 1 {- one\n-}\ny = 2\n", 2), 2);
+});
+
+test("a module line and an import expose a name more or one fewer, and an import line is added below the others", () => {
+  const text = "module A exposing (a, b)\n\nimport B exposing (f)\nimport C as K\nimport D exposing\n    ( g\n    , f -- the one\n    )\n\n\na =\n    1\n";
+  assert.match(withExposing(text, "b", false), /^module A exposing \( a \)$/m);
+  assert.match(withExposing(text, "c", true), /^module A exposing \( a, b, c \)$/m);
+  assert.equal(withExposing("module A exposing (..)\n", "c", true), "module A exposing (..)\n");
+  // An import whose list would be empty loses it, and one without a list gets one
+  assert.match(withImportExposing(text, "B", "f", false), /^import B\nimport C as K$/m);
+  assert.match(withImportExposing(text, "C", "f", true), /^import C as K exposing \(f\)$/m);
+  assert.match(withImportExposing(text, "D", "f", false), /^import D exposing\n {4}\( g \)$/m);
+  assert.match(withImport(text, "import E"), /^ {4}\)\nimport E\n\n\na =$/m);
+  // Without imports, the comment that documents the module stays above them, blank lines in it as well
+  assert.equal(withImport("module A exposing (a)\n\n{-| A.\n\nMore.\n-}\n\n\na =\n    1\n", "import E"), "module A exposing (a)\n\n{-| A.\n\nMore.\n-}\nimport E\n\n\na =\n    1\n");
+  assert.equal(withImport("module A exposing (a)\n\n\na =\n    1\n", "import E"), "module A exposing (a)\nimport E\n\n\na =\n    1\n");
 });

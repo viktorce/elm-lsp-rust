@@ -70,7 +70,8 @@ function lastWords(agent) {
   return agent.endedOnApiError ? "no answer from the API" : agent.stopReason;
 }
 
-export const runId = (task, arm, repetition) => `${task.id.replace("/", "--")}--${arm}--${repetition}`;
+// A task's id has the codebase, the task type and the level, with a slash between each two. A file name has none.
+export const runId = (task, arm, repetition) => `${task.id.replaceAll("/", "--")}--${arm}--${repetition}`;
 
 // A session that is set up differently from what its arm means measures nothing. Null when it is as it should be.
 // `version` is the version of Claude Code that the run began with, where the caller holds its sessions to one.
@@ -98,15 +99,18 @@ function wrongSetup(arm, agent, version) {
 /**
  * What the session left behind, judged. A session can leave the project in a
  * state that cannot even be read, and that is a result too, so nothing here
- * may cost the run its record.
+ * may cost the run its record. `unmet` has the kinds of the task's
+ * expectations that do not hold, and `checkMs` how long the check took.
  */
-async function judge(worktree, codebase, task, before) {
+export async function judge(worktree, codebase, task, before) {
   // What is known of the result by the time something fails. A checkout that cannot be read
   // before the check has run, with its .git gone for one, is counted with those that do not compile.
-  const known = { compiles: false, patch: "" };
+  const known = { compiles: false, patch: "", unmet: [], checkMs: null };
   try {
     const changed = await changedFiles(worktree, codebase, before);
+    const checking = Date.now();
     const after = await runCheck(worktree, codebase);
+    known.checkMs = Date.now() - checking;
     known.compiles = after.ok;
     const left = {
       changed,
@@ -115,15 +119,19 @@ async function judge(worktree, codebase, task, before) {
       originals: await originalsOf(worktree, changed, before),
       committed: await committedFiles(worktree),
     };
+    // One expectation at a time, so that each sentence keeps the kind of what it says does not hold
+    const unmet = task.expect.flatMap((expectation) =>
+      unmetExpectations(realRootOf(worktree), [expectation], left).map((problem) => ({ kind: expectation.kind, problem }))
+    );
     const problems = [
       ...(after.ok ? [] : [after.problem]),
-      ...unmetExpectations(realRootOf(worktree), task.expect, left),
+      ...unmet.map(({ problem }) => problem),
       // Its changes are judged all the same, since they are compared with the commit the session started from
       ...((await isOnItsCommit(worktree)) ? [] : ["the session created a commit, which the task told it not to"]),
     ];
     // The files of the project that changed. What a build wrote beside them, or a note, is in the patch and no change.
     const counted = changed.filter((file) => left.committed.has(file) || file.endsWith(".elm"));
-    return { compiles: after.ok, problems, changedFiles: counted.length, patch: left.patch };
+    return { compiles: after.ok, problems, unmet: unmet.map(({ kind }) => kind), checkMs: known.checkMs, changedFiles: counted.length, patch: left.patch };
   } catch (error) {
     // Ended from outside, which says nothing about what the session left behind
     if (isStopped()) throw new Interrupted();
@@ -208,6 +216,8 @@ export async function executeRun({ task, codebase, arm, repetition, options, aft
       codebase: task.codebase,
       commit: worktree.commit,
       type: task.type,
+      level: task.level,
+      files: task.files,
       arm,
       repetition,
       model: options.model,

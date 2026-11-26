@@ -14,9 +14,11 @@ import { REPO } from "./support.mjs";
 // `outcome` is one of the outcomes, or what stopped a failed session
 const record = (arm, outcome, costUsd, wallMs, repetition = 1) => ({
   id: "private-id",
-  task: "A/rename-function",
+  task: "A/rename-function/10",
   codebase: "A",
   type: "rename-function",
+  level: 10,
+  files: 12,
   arm,
   repetition,
   model: "claude-opus-5-5",
@@ -122,12 +124,13 @@ test("the report states the headline figures and lists every session", () => {
   assert.match(renderReport(mixed), /claude-opus-5-5 at effort high and Claude Code&#39;s default effort in Claude Code 2\.1\.0 worked on/);
   assert.match(html, /<span class="value">0 of 1<\/span>/);
   assert.match(html, /<span class="value">1 of 1<\/span>/);
-  assert.match(html, /<td>Wrong result<\/td><td class="number">1 min 15 s<\/td><td class="number">\$0\.25<\/td>/);
-  assert.match(html, /<td>Solved<\/td><td class="number">9 s<\/td><td class="number">\$0\.13<\/td>/);
+  // Each session's level and the files of its target stand beside its outcome
+  assert.match(html, /<td>Wrong result<\/td><td class="number">10<\/td><td class="number">12<\/td><td class="number">1 min 15 s<\/td><td class="number">\$0\.25<\/td>/);
+  assert.match(html, /<td>Solved<\/td><td class="number">10<\/td><td class="number">12<\/td><td class="number">9 s<\/td><td class="number">\$0\.13<\/td>/);
   // How often a session had to ask the API again, which tells waiting from slow work
   assert.deepEqual(summary.runs.map((run) => run.apiRetries), [0, 3]);
   assert.match(html, /<th class="number">Files<\/th><th class="number">API retries<\/th><\/tr>/);
-  assert.match(html, /<td>Solved<\/td>(<td class="number">[^<]+<\/td>){6}<td class="number">3<\/td><\/tr>/);
+  assert.match(html, /<td>Solved<\/td>(<td class="number">[^<]+<\/td>){8}<td class="number">3<\/td><\/tr>/);
   // Every bar can be read without hovering: its value is printed at its tip and in its tooltip
   assert.match(html, /data-tip="Rename a function with a unique name · With language server · Median cost: \$0\.13 \(1 session\)"/);
   assert.match(html, /<text x="[\d.]+" y="[\d.]+">\$0\.13<\/text>/);
@@ -159,6 +162,86 @@ test("the report states the headline figures and lists every session", () => {
   // So does one that ends at ten cents, whose steps are two and a half
   const dime = renderReport(summarize(plan, [record("baseline", "passed", 0.09, 1000), record("lsp", "passed", 0.05, 1000)]));
   assert.match(dime, />\$0\.025<\/text>.*>\$0\.050<\/text>.*>\$0\.075<\/text>.*>\$0\.100<\/text>/);
+});
+
+test("the summary and the page give the figures of each task type per level and arm, with the files of each target", () => {
+  const plan = { codebases: [{ label: "A", modules: 12, lines: 3400 }, { label: "B", modules: 30, lines: 9000 }] };
+  // A session at a level of a codebase, whose target involves `files` files
+  const at = (codebase, level, files, arm, costUsd, wallMs, outcome = "passed") => ({
+    ...record(arm, outcome, costUsd, wallMs),
+    task: `${codebase}/rename-function/${level}`,
+    codebase,
+    level,
+    files,
+  });
+  const summary = summarize(plan, [
+    at("B", 50, 51, "baseline", 0.6, 120000),
+    at("B", 50, 51, "lsp", 0.3, 60000),
+    at("A", 10, 10, "baseline", 0.2, 30000),
+    at("A", 10, 10, "lsp", 0.2, 20000),
+    at("A", 50, 45, "baseline", 0.8, 180000, "wrong-result"),
+    at("A", 50, 45, "lsp", 0.4, 90000),
+  ]);
+  const [type] = summary.taskTypes;
+  // Smallest level first, and the codebases in the plan's order
+  assert.deepEqual(
+    type.levels.map(({ level, targets, baseline, lsp }) => [level, targets, baseline.solved, baseline.sessions, baseline.costUsd, lsp.costUsd, lsp.wallMs]),
+    [
+      [10, [{ codebase: "A", files: 10 }], 1, 1, 0.2, 0.2, 20000],
+      [50, [{ codebase: "A", files: 45 }, { codebase: "B", files: 51 }], 1, 2, 0.7, 0.35, 75000],
+    ]
+  );
+  // The task type's own figures cover every level
+  assert.equal(type.baseline.sessions, 3);
+  assert.deepEqual(summary.runs.map(({ level, files }) => [level, files]), [[50, 51], [50, 51], [10, 10], [10, 10], [50, 45], [50, 45]]);
+
+  const html = renderReport(summary);
+  // One chart of cost and one of time, a line and a point per level for each arm
+  assert.match(html, /aria-label="Median cost per level of Rename a function with a unique name, one line per arm\./);
+  assert.match(html, /aria-label="Median time per level of Rename a function with a unique name, one line per arm\./);
+  assert.equal(html.match(/<path class="trend lsp"/g).length, 2);
+  assert.equal(html.match(/<circle class="dot baseline"/g).length, 4);
+  assert.match(html, /data-tip="Rename a function with a unique name · level 50 · With language server · Median cost: \$0\.35 \(2 sessions\)"/);
+  // The last point of a line has its value beside it
+  assert.match(html, /<circle class="dot lsp"[^>]*\/><text x="[\d.]+" y="[\d.]+">\$0\.35<\/text>/);
+  // The table: a level, the files of each codebase's target, then a row per arm
+  assert.match(
+    html,
+    /<tr class="level"><td rowspan="2">50<\/td><td rowspan="2">A 45, B 51<\/td><td><span class="key baseline"><\/span>Without language server<\/td><td class="number">1 of 2<\/td><td class="number">\$0\.70<\/td><td class="number">2 min 30 s<\/td><td class="number">2<\/td><\/tr>/
+  );
+
+  // A record of a run made before plans had levels has none, and the page says so
+  const { level, files, ...unlevelled } = record("baseline", "passed", 0.2, 30000);
+  const old = summarize(plan, [unlevelled, { ...unlevelled, arm: "lsp" }]);
+  assert.deepEqual(old.taskTypes[0].levels.map(({ level, targets }) => [level, targets]), [[null, [{ codebase: "A", files: null }]]]);
+  assert.match(renderReport(old), /<td rowspan="2">n\/a<\/td><td rowspan="2">A n\/a<\/td>/);
+});
+
+test("every kind of task has its title and its levels on the page and in the summary", () => {
+  const plan = { codebases: [{ label: "A", commit: "abc123", modules: 12, lines: 3400 }] };
+  const records = ["rename-type", "move-function", "remove-variant", "remove-field"].flatMap((type) =>
+    [10, 50].flatMap((level) =>
+      ["baseline", "lsp"].map((arm) => ({ ...record(arm, "passed", 0.1, 10000), type, task: `A/${type}/${level}`, level, files: level + 1 }))
+    )
+  );
+  const summary = summarize(plan, records);
+  assert.deepEqual(
+    summary.taskTypes.map(({ id, title, levels }) => [id, title, levels.map(({ level, targets }) => [level, targets])]),
+    [
+      ["rename-type", "Rename a custom type or a type alias", [[10, [{ codebase: "A", files: 11 }]], [50, [{ codebase: "A", files: 51 }]]]],
+      ["move-function", "Move a function to another module", [[10, [{ codebase: "A", files: 11 }]], [50, [{ codebase: "A", files: 51 }]]]],
+      ["remove-variant", "Remove a variant and every branch that matches on it", [[10, [{ codebase: "A", files: 11 }]], [50, [{ codebase: "A", files: 51 }]]]],
+      ["remove-field", "Remove a record field and replace every read of it", [[10, [{ codebase: "A", files: 11 }]], [50, [{ codebase: "A", files: 51 }]]]],
+    ]
+  );
+  const html = renderReport(summary);
+  // The bars name each kind short, and its card and its charts by its whole title
+  for (const short of ["Rename type", "Move function", "Remove variant", "Remove field"]) assert.match(html, new RegExp(`text-anchor="end">${short}</text>`));
+  const titles = ["Rename a custom type or a type alias", "Move a function to another module", "Remove a variant and every branch that matches on it", "Remove a record field and replace every read of it"];
+  for (const title of titles) {
+    assert.match(html, new RegExp(`<h2>${title}</h2>`));
+    assert.match(html, new RegExp(`aria-label="Median cost per level of ${title}, one line per arm\\.`));
+  }
 });
 
 test("the README's account of the run holds the figures of the run's summary", () => {

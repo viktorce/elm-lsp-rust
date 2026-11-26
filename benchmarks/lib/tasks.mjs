@@ -11,6 +11,8 @@ import { join, relative, resolve } from "path";
 import { isDeepStrictEqual } from "util";
 import {
   codeOnly,
+  countBy,
+  filesOf,
   layoutOf,
   literalLineStarts,
   headerLine,
@@ -18,12 +20,17 @@ import {
   mentions,
   NAME_END,
   namesIn,
+  namesType,
+  readersOf,
   refersTo,
   scanProject,
   scanSource,
   tokensOf,
   UPPER_NAME,
+  withVariant,
 } from "./elm-source.mjs";
+import { moveCandidates, movedFiles, movePairs } from "./move.mjs";
+import { fieldCandidates, removalTrial, removedFrom, variantCandidates, withoutTodoMessages } from "./remove.mjs";
 
 // Suffix of every new name. A target whose new name stands in the project's code already is left
 // out. A function without an annotation, a record alias or a variable of that name would clash
@@ -36,6 +43,13 @@ const NEW_VARIANT = "AddedByBenchmark";
 // A name this short is too likely to appear inside unrelated words and strings
 const MIN_NAME_LENGTH = 4;
 
+// What a removal finds its candidates by: the shortest name it takes, and the new name of the
+// trial's rename, which must not stand in the code already
+const REMOVABLE = { minNameLength: MIN_NAME_LENGTH, suffix: SUFFIX };
+
+// A removal leaves what it removes unused, and the request says what becomes of that
+const LEAVE_THE_REST = "Leave every other function, variable and import as it is, also one that the removal leaves unused.";
+
 /**
  * @typedef {object} Target
  * @property {string} key    Stable identity, used to order equal candidates
@@ -47,25 +61,28 @@ const MIN_NAME_LENGTH = 4;
  * @typedef {object} TaskType
  * @property {string} id
  * @property {string} title
- * @property {number} idealSize  Candidates nearest to this size are tried first
  * @property {(project: import("./elm-source.mjs").ElmFile[], entries: string[]) => Target[]} candidates
  * @property {(target: Target, check: string, project?: { exposed?: string[] }) => { prompt: string, expect: object[], facts: object }} build
  *   `project.exposed` has the modules that elm.json lists as exposed, where the project is a package
- * @property {(target: Target) => { type: string, variant: string }} [breaksBuild]
- *   A variant to add to the target's file. The planner only keeps a target
- *   when the compiler rejects the project with that variant added, which
- *   proves there is work to do.
+ * @property {Trial} [trial]
+ *
+ * @typedef {object} Trial  Changes that the planner makes in a checkout and builds, one after the
+ *   other, before it takes a target. It keeps the target only where the compiler says what the
+ *   trial asks of each: that there is work to do, or that the change compiles.
+ * @property {(target: Target, read: (file: string) => string) => Record<string, string>[] | null} edits
+ *   The changes, each as the files it makes with their new texts. Null where they cannot be made.
+ * @property {boolean} compiles  Whether the project has to compile with each change, or to fail
+ * @property {(target: Target, index: number) => string} what  The change of that index, as "with the variant X added to the type T in F"
+ * @property {string} question  What a build that ran out of time leaves unknown
+ * @property {(tried: string) => string} vain  What the builds said of the targets that were tried in vain, `tried` being which ones
+ * @property {(count: number) => string} unmade  Why `count` targets could not be tried
  */
 
-function countBy(values) {
-  const counts = new Map();
-  for (const value of values) {
-    counts.set(value, (counts.get(value) ?? 0) + 1);
-  }
-  return counts;
-}
+/** "the one target that was tried", "each of the 3 targets that were tried" */
+export const triedTargets = (count) => (count === 1 ? "the one target that was tried" : `each of the ${count} targets that were tried`);
 
-const files = (sources) => sources.map((source) => source.file);
+/** "10", "10 and 50", "10, 50 and 100" */
+export const listed = (items) => (items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`);
 
 /** "1 session", "2 sessions": a number with the word for one of the thing, or for several */
 export const plural = (number, one, many) => `${number} ${number === 1 ? one : many}`;
@@ -93,11 +110,11 @@ function functionCandidates(project, shared) {
         // No other module can name a function that its own module keeps to itself
         size: source.exposedFunctions.includes(name) ? importers.filter((importer) => refersTo(importer, source.module, name)).length : 0,
         file: source.file,
-        affected: files(importers),
+        affected: filesOf(importers),
         module: source.module,
         name,
-        mayChange: [source.file, ...files(importers)],
-        namesakes: files(project.filter((other) => other !== source && other.functions.includes(name))),
+        mayChange: [source.file, ...filesOf(importers)],
+        namesakes: filesOf(project.filter((other) => other !== source && other.functions.includes(name))),
         // Records with a field of the function's name. A text replace renames that too.
         fields: aliases.filter(({ alias }) => alias.fields.includes(name)).map(({ file, alias }) => ({ file, alias: alias.name })),
       });
@@ -136,7 +153,6 @@ export const TASK_TYPES = [
   {
     id: "rename-function",
     title: "Rename a function with a unique name",
-    idealSize: 10,
     candidates: (project) => functionCandidates(project, false),
     build: buildFunctionRename,
   },
@@ -144,7 +160,6 @@ export const TASK_TYPES = [
   {
     id: "rename-shared-function",
     title: "Rename a function whose name other modules also use",
-    idealSize: 10,
     candidates: (project) => functionCandidates(project, true),
     build: buildFunctionRename,
   },
@@ -152,7 +167,6 @@ export const TASK_TYPES = [
   {
     id: "rename-variant",
     title: "Rename a variant of a custom type",
-    idealSize: 10,
     candidates(project) {
       const types = project.flatMap((source) => source.types.map((type) => ({ file: source.file, type })));
       const taken = namesIn(project);
@@ -169,16 +183,16 @@ export const TASK_TYPES = [
               size: type.open ? importers.filter((importer) => refersTo(importer, source.module, variant, type.name)).length : 0,
               file: source.file,
               module: source.module,
-              affected: files(importers),
+              affected: filesOf(importers),
               type: type.name,
               variant,
-              mayChange: [source.file, ...files(importers)],
+              mayChange: [source.file, ...filesOf(importers)],
               // Other types with a variant of the same name. A text replace renames those too.
               namesakes: types
                 .filter((other) => other.type !== type && other.type.variants.includes(variant))
                 .map((other) => ({ file: other.file, type: other.type.name })),
               // Types of the variant's own name, as in `type Page = Settings Settings`
-              types: files(project.filter((other) => other.typeNames.includes(variant))),
+              types: filesOf(project.filter((other) => other.typeNames.includes(variant))),
             });
           }
         }
@@ -212,7 +226,6 @@ export const TASK_TYPES = [
   {
     id: "rename-field",
     title: "Rename a record field whose name other records also use",
-    idealSize: 10,
     candidates(project) {
       const aliases = project.flatMap((source) => source.aliases.map((alias) => ({ file: source.file, alias })));
       const owners = countBy(aliases.flatMap(({ alias }) => alias.fields));
@@ -234,15 +247,14 @@ export const TASK_TYPES = [
               size: users.length,
               file: source.file,
               module: source.module,
-              // A record travels through values, so a module can read the field without importing the alias
-              affected: files(project.filter((other) => other !== source && mentions(other.code, field))),
+              affected: readersOf(project, source, field),
               alias: alias.name,
               field,
               namesakes: aliases
                 .filter((other) => other.alias !== alias && other.alias.fields.includes(field))
                 .map((other) => ({ file: other.file, alias: other.alias.name })),
               // Functions of the field's name
-              functions: files(project.filter((other) => other.functions.includes(field))),
+              functions: filesOf(project.filter((other) => other.functions.includes(field))),
             });
           }
         }
@@ -273,7 +285,6 @@ export const TASK_TYPES = [
   {
     id: "rename-module",
     title: "Rename a module",
-    idealSize: 10,
     candidates(project, entries) {
       const taken = namesIn(project);
       return project
@@ -287,10 +298,10 @@ export const TASK_TYPES = [
             key: source.file,
             size: importers.length,
             file: source.file,
-            affected: files(importers),
+            affected: filesOf(importers),
             module: source.module,
             newFile,
-            mayChange: [source.file, newFile, ...files(importers)],
+            mayChange: [source.file, newFile, ...filesOf(importers)],
           };
         });
     },
@@ -322,8 +333,17 @@ export const TASK_TYPES = [
   {
     id: "add-variant",
     title: "Add a variant and handle it in every case expression",
-    idealSize: 5,
-    breaksBuild: ({ type }) => ({ type, variant: NEW_VARIANT }),
+    trial: {
+      edits({ file, type }, read) {
+        const text = withVariant(read(file), type, NEW_VARIANT);
+        return text === null ? null : [{ [file]: text }];
+      },
+      compiles: false,
+      what: ({ file, type }) => `with the variant ${NEW_VARIANT} added to the type ${type} in ${file}`,
+      question: "whether the variant breaks the build",
+      vain: (tried) => `the project still compiled with the change made to ${tried}, so there was no work to ask for`,
+      unmade: (count) => `the plan adds a variant on a line of its own, as elm-format lays a type out, and ${count === 1 ? "the one target is" : `none of the ${count} targets is`} written that way`,
+    },
     candidates(project) {
       if (namesIn(project).has(NEW_VARIANT)) return [];
       const candidates = [];
@@ -341,9 +361,9 @@ export const TASK_TYPES = [
             ).length,
             file: source.file,
             module: source.module,
-            affected: files(importers),
+            affected: filesOf(importers),
             type: type.name,
-            mayChange: [source.file, ...files(importers)],
+            mayChange: [source.file, ...filesOf(importers)],
           });
         }
       }
@@ -365,11 +385,186 @@ export const TASK_TYPES = [
       };
     },
   },
+
+  {
+    id: "rename-type",
+    title: "Rename a custom type or a type alias",
+    candidates(project) {
+      const taken = namesIn(project);
+      const variants = project.flatMap((source) => source.types.flatMap((type) => type.variants.map((variant) => ({ file: source.file, type: type.name, variant }))));
+      const candidates = [];
+      for (const source of project) {
+        for (const name of source.typeNames) {
+          if (name.length < MIN_NAME_LENGTH || taken.has(name + SUFFIX)) continue;
+          const importers = importersOf(project, source.module);
+          candidates.push({
+            key: `${source.file}:${name}`,
+            // No other module can name a type that its own module keeps to itself
+            size: source.exposedTypes.includes(name) ? importers.filter((importer) => namesType(importer, source.module, name)).length : 0,
+            file: source.file,
+            module: source.module,
+            affected: filesOf(importers),
+            name,
+            kind: source.types.some((type) => type.name === name) ? "custom type" : "type alias",
+            mayChange: [source.file, ...filesOf(importers)],
+            // Types of the same name in other modules
+            namesakes: filesOf(project.filter((other) => other !== source && other.typeNames.includes(name))),
+            // Variants of the type's name, as in `type Email = Email String`, and on other types. A text replace renames those too.
+            variants: variants.filter(({ variant }) => variant === name).map(({ file, type }) => ({ file, type })),
+          });
+        }
+      }
+      return candidates;
+    },
+    build({ file, name, kind, mayChange, namesakes, variants, size }, check) {
+      const newName = name + SUFFIX;
+      const own = variants.some((variant) => variant.file === file && variant.type === name);
+      const others = variants.length - (own ? 1 : 0);
+      const asides = [
+        own ? ` Its variant \`${name}\` keeps its name.` : "",
+        others > 0 ? ` ${plural(others, "other custom type has", "other custom types have")} a variant called \`${name}\`. It keeps that name there.` : "",
+        namesakes.length > 0 ? ` ${plural(namesakes.length, "other module declares", "other modules declare")} a type \`${name}\` of ${namesakes.length === 1 ? "its" : "their"} own. That keeps its name.` : "",
+      ].join("");
+      return {
+        prompt:
+          `Rename the ${kind} \`${name}\` in \`${file}\` to \`${newName}\`, ` +
+          `and update every place that names it in the project.${asides}\n\n${closing(check)}`,
+        expect: [
+          { kind: "declares-type", file, name: newName },
+          { kind: "lacks-type", file, name },
+          ...(namesakes.length > 0 ? [{ kind: "types-kept", name, files: namesakes }] : []),
+          // The type's own variant stays with the type under its new name
+          ...(variants.length > 0
+            ? [{ kind: "variants-kept", variant: name, types: variants.map((variant) => (variant.file === file && variant.type === name ? { file, type: newName } : variant)) }]
+            : []),
+          { kind: "renames-only", of: "type", from: name, to: newName },
+          { kind: "changes-only-in", files: mayChange },
+          { kind: "only-elm-files" },
+        ],
+        facts: { filesUsingIt: size, namesakes: namesakes.length },
+      };
+    },
+  },
+
+  {
+    id: "move-function",
+    title: "Move a function to another module",
+    candidates: (project, entries = []) => moveCandidates(project, entries, MIN_NAME_LENGTH),
+    trial: {
+      edits: (target, read) => [movedFiles(target, read)],
+      compiles: true,
+      what: ({ name, file, destinationFile }) => `with the function ${name} moved from ${file} to ${destinationFile}`,
+      question: "whether the project compiles with the move",
+      vain: (tried) => `the project did not compile once the plan had moved the function of ${tried}`,
+      unmade: (count) => `the plan could not move the function of ${count === 1 ? "the one target" : `any of the ${count} targets`}`,
+    },
+    build({ file, module, name, destination, destinationFile, users, bareUsers, calledAtHome, newImports, taken, imports, requalified, mayChange, size }, check) {
+      const quoted = (names) => listed(names.map((each) => `\`${each}\``));
+      const asides = [
+        bareUsers.length > 0 || calledAtHome
+          ? ` A call of it without a qualifier stays as it is. A module that calls it so, or that lists it in its import of \`${module}\`, imports \`${name}\` by name from \`${destination}\` instead: ` +
+            `add it to the exposing list of the module's import of \`${destination}\`, or add the line \`import ${destination} exposing (${name})\` where there is none, ` +
+            `and take it out of the exposing list of the import of \`${module}\`, together with the word \`exposing\` where nothing else stays in that list.`
+          : "",
+        newImports.length > 0
+          ? ` ${plural(newImports.length, "module that calls it with a qualifier does", "modules that call it with a qualifier do")} not import \`${destination}\` yet. Add the line \`import ${destination}\` to ${newImports.length === 1 ? "it" : "each of them"}.`
+          : "",
+        imports.length > 0
+          ? ` The function takes names from ${quoted(imports)}, which \`${destination}\` does not import. Add the line ${quoted(imports.map((each) => `import ${each}`))} to \`${destination}\`, ` +
+            `and write each name that the function takes from ${imports.length === 1 ? "that module" : "them"} with the whole name of its module in front.`
+          : "",
+        requalified
+          ? ` The function takes every other name of another module through the import of that module that \`${destination}\` has. ` +
+            `A name that the function writes with a qualifier gets the qualifier of that import. A name that it writes bare stays bare where that import exposes it, and gets that qualifier where it does not.`
+          : "",
+      ].join("");
+      return {
+        prompt:
+          `Move the function \`${name}\`, with its type annotation, from the module \`${module}\` in \`${file}\` to the module \`${destination}\` in \`${destinationFile}\`. ` +
+          `\`${destination}\` exposes it from then on, and \`${module}\` no longer does. ` +
+          `A call of it with a qualifier names it through the module's import of \`${destination}\` from then on, with the qualifier that this import gives.${asides} ` +
+          `Leave every other import as it is, also one that the move leaves unused.\n\n${closing(check)}`,
+        expect: [
+          { kind: "declares-function", file: destinationFile, name },
+          { kind: "lacks-function", file, name },
+          { kind: "moves-function", name, module, destination, from: file, to: destinationFile, users, taken, imports, calledAtHome },
+          { kind: "changes-only-in", files: mayChange },
+          { kind: "only-elm-files" },
+        ],
+        facts: { filesUsingIt: size, newImports: newImports.length },
+      };
+    },
+  },
+
+  {
+    id: "remove-variant",
+    title: "Remove a variant and every branch that matches on it",
+    candidates: (project) => variantCandidates(project, REMOVABLE),
+    trial: {
+      edits: ({ file, module, type, variant, users }, read) => removalTrial({ of: "variant", file, module, type, variant, users }, read, variant + SUFFIX),
+      compiles: true,
+      what: ({ file, type, variant }, index) =>
+        index === 0 ? `with the variant ${variant} of the type ${type} in ${file} renamed wherever the plan reads a use of it` : `with the variant ${variant} removed from the type ${type} in ${file}`,
+      question: "whether the project compiles with the change",
+      vain: (tried) => `the project did not compile once the plan had removed the variant of ${tried}, or renamed it wherever the plan reads a use of it`,
+      unmade: (count) => `the plan could not make the removal of ${count === 1 ? "the one target" : `any of the ${count} targets`}`,
+    },
+    build({ file, module, type, variant, users, size }, check) {
+      return {
+        prompt:
+          `Remove the variant \`${variant}\` from the custom type \`${type}\` in \`${file}\`. ` +
+          `Remove every branch of a \`case\` whose pattern names \`${variant}\`, also where it stands inside a tuple or inside the pattern of another variant, as in \`( ${variant}, _ )\` or \`Just ${variant}\`, since such a branch can no longer match. ` +
+          `A \`case\` that is left with one branch stays a \`case\`. ` +
+          `Replace every other use of \`${variant}\`, also one written with a qualifier, with \`Debug.todo\` and a string literal of your choice for its message. ` +
+          `Where arguments follow \`${variant}\` directly, as in \`${variant} a b\`, the whole application with its arguments is replaced. ` +
+          `Elsewhere, as in \`List.map ${variant} items\` or \`${variant} <| a\`, only the name is. ${LEAVE_THE_REST}\n\n${closing(check)}`,
+        expect: [
+          { kind: "type-lacks-variant", file, type, variant },
+          { kind: "removes-only", removal: { of: "variant", file, module, type, variant, users } },
+          { kind: "only-elm-files" },
+        ],
+        facts: { filesUsingIt: size },
+      };
+    },
+  },
+
+  {
+    id: "remove-field",
+    title: "Remove a record field and replace every read of it",
+    candidates: (project) => fieldCandidates(project, REMOVABLE),
+    trial: {
+      edits: ({ file, module, alias, field, fields, users }, read) => removalTrial({ of: "field", file, module, alias, field, fields, users }, read, field + SUFFIX),
+      compiles: true,
+      what: ({ file, alias, field }, index) =>
+        index === 0 ? `with the field ${field} of the alias ${alias} in ${file} renamed wherever the plan reads a use of it` : `with the field ${field} removed from the alias ${alias} in ${file}`,
+      question: "whether the project compiles with the change",
+      vain: (tried) => `the project did not compile once the plan had removed the field of ${tried}, or renamed it wherever the plan reads a use of it`,
+      unmade: (count) => `the plan could not make the removal of ${count === 1 ? "the one target" : `any of the ${count} targets`}`,
+    },
+    build({ file, module, alias, field, fields, users, size }, check) {
+      return {
+        prompt:
+          `Remove the field \`${field}\` from the record type alias \`${alias}\` in \`${file}\`. ` +
+          `Take it out of every record that is built with it, as in \`{ ${field} = ..., ... }\`, together with its value, and out of every record update that sets it, as in \`{ r | ${field} = ... }\`. ` +
+          `An update that sets no other field becomes the record alone, \`r\`. ` +
+          `Replace every read of the field with \`Debug.todo\` and a string literal of your choice for its message. ` +
+          `A read with a dot, as in \`user.${field}\` or \`(get id).${field}\`, is replaced together with the record in front of the dot, and a field read behind it stays, as in \`(Debug.todo "...").next\` for \`user.${field}.next\`. ` +
+          `An accessor function, \`.${field}\`, also in a pipeline as in \`user |> .${field}\`, becomes a function that ignores its argument, \`\\_ -> Debug.todo "..."\`. ` +
+          `No other record type of the project has a field \`${field}\`, no record pattern names it, and no code calls \`${alias}\` as a function. ${LEAVE_THE_REST}\n\n${closing(check)}`,
+        expect: [
+          { kind: "alias-lacks-field", file, alias, field },
+          { kind: "removes-only", removal: { of: "field", file, module, alias, field, fields, users } },
+          { kind: "only-elm-files" },
+        ],
+        facts: { filesUsingIt: size },
+      };
+    },
+  },
 ];
 
 /**
- * The targets of one task type in a project, most suitable first: at least
- * `minFiles` files involved, and as close to the type's ideal size as possible.
+ * The targets of one task type in a project that involve at least `minFiles`
+ * files, in the order of the candidates. levels.mjs picks among them.
  *
  * The check command must compile the target's file and every file the change
  * can break. The compiler's verdict says nothing about a module it never
@@ -379,12 +574,8 @@ export const TASK_TYPES = [
  * @param {Set<string>} compiled  The files it compiles from them
  * @param {Target[]} [candidates]  The candidates of the task type, where the caller found them already
  */
-export function rankedTargets(taskType, project, { entries, compiled }, minFiles, candidates = taskType.candidates(project, entries)) {
-  const distance = (target) => Math.abs(target.size - taskType.idealSize);
-  return candidates
-    .filter((target) => target.size >= minFiles && [target.file, ...target.affected].every((file) => compiled.has(file)))
-    // Compared by code unit, so the plan does not depend on the machine's locale
-    .sort((a, b) => distance(a) - distance(b) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+export function suitableTargets(taskType, project, { entries, compiled }, minFiles, candidates = taskType.candidates(project, entries)) {
+  return candidates.filter((target) => target.size >= minFiles && [target.file, ...target.affected].every((file) => compiled.has(file)));
 }
 
 /**
@@ -392,12 +583,15 @@ export function rankedTargets(taskType, project, { entries, compiled }, minFiles
  * the target's module, or names the field, which needs no import. The check
  * command never compiles such a file. A change that left it behind would
  * pass, and one that followed it there would count as changing a file that
- * cannot use the target.
+ * cannot use the target. A function that moves gives its destination one
+ * more name, which can clash with one of such a file that imports it.
  * @param {import("./elm-source.mjs").ElmFile[]} outsiders
  */
 export function usedOutside(target, outsiders) {
   return outsiders.some(
-    (outsider) => outsider.imports.includes(target.module) || (target.field !== undefined && mentions(outsider.code, target.field))
+    (outsider) =>
+      [target.module, target.destination].some((module) => module !== undefined && outsider.imports.includes(module)) ||
+      (target.field !== undefined && mentions(outsider.code, target.field))
   );
 }
 
@@ -460,6 +654,7 @@ const BODY_PART = /\s*(?:([()])|(Debug\.todo)(?![\p{L}0-9_.])|(<\|)|("""(?:[^"\\
 const NAMED_IN_HEADER = {
   module: (at, exposing) => at < exposing,
   function: (at, exposing) => at > exposing,
+  type: (at, exposing) => at > exposing,
   variant: () => false,
   field: () => false,
 };
@@ -476,16 +671,20 @@ const NAMED_IN_HEADER = {
  * stand. A module's name changes in front of a dot, and in a module line or
  * an import outside of what that exposes: a module often declares a type of
  * its own name, `module User exposing (User)`, and that type keeps its name.
- * A function's name changes in what such a line exposes and nowhere else in
- * it. A variant and a field are named in none of them, so an import alias of
- * the variant's name, `import Page.Settings as Settings`, keeps its name too.
- * @param {{ of: "function" | "variant" | "field" | "module", from: string, to: string }} rename
+ * A function's name and a type's change in what such a line exposes and
+ * nowhere else in it. A module's name stands in front of a dot and a type's
+ * never does, so in `Email.Email` only the second is the type. A variant and
+ * a field are named in none of them, so an import alias of the variant's
+ * name, `import Page.Settings as Settings`, keeps its name too.
+ * @param {{ of: "function" | "type" | "variant" | "field" | "module", from: string, to: string }} rename
+ * @param {(tokens: string[]) => string[]} [normal]  What the tokens of the code below the imports are read as, on both sides
  */
-function beyondRename(before, after, { of, from, to }) {
+function beyondRename(before, after, { of, from, to }, normal = (tokens) => tokens) {
   const [was, is] = [tokensOf(before), tokensOf(after)];
-  for (let at = 0; at < Math.max(was.body.length, is.body.length); at++) {
-    const [old, now] = [was.body[at], is.body[at]];
-    const renamed = old === from && now === to && (of !== "module" || is.body[at + 1] === ".");
+  const [wasBody, isBody] = [normal(was.body), normal(is.body)];
+  for (let at = 0; at < Math.max(wasBody.length, isBody.length); at++) {
+    const [old, now] = [wasBody[at], isBody[at]];
+    const renamed = old === from && now === to && (of === "module" ? isBody[at + 1] === "." : of !== "type" || isBody[at + 1] !== ".");
     if (old !== now && !renamed) {
       return `${old ?? "the end of the file"} became ${now ?? "the end of the file"}`;
     }
@@ -539,7 +738,11 @@ const CHECKS = {
     return lost.length > 0 ? `${variant} was also renamed or removed on ${lost.map((l) => `${l.type} (${l.file})`).join(", ")}` : null;
   },
 
-  // A type or a type alias called like a variant is another thing, and keeps its name
+  "declares-type": ({ file, name }, { elmRoot }) => (scan(elmRoot, file)?.typeNames.includes(name) ? null : `${file} does not declare the type ${name}`),
+
+  "lacks-type": ({ file, name }, { elmRoot }) => (scan(elmRoot, file)?.typeNames.includes(name) ? `${file} still declares the type ${name}` : null),
+
+  // A type or a type alias of another module, or one called like a variant, is another thing and keeps its name
   "types-kept": ({ name, files }, { elmRoot }) => {
     const lost = files.filter((file) => !scan(elmRoot, file)?.typeNames.includes(name));
     return lost.length > 0 ? `the type ${name} was also renamed or removed in ${lost.join(", ")}` : null;
@@ -576,13 +779,45 @@ const CHECKS = {
     return null;
   },
 
+  // The destination holds the function with the tokens it had, apart from the qualifiers its imports
+  // ask for. Its old module lost it and nothing else, and each user calls it through the destination.
+  "moves-function": (move, { elmRoot, changed, originals }) => {
+    const original = (file) => (originals.has(file) ? originals.get(file) : read(elmRoot, file));
+    for (const file of changed.filter((path) => [move.from, move.to, ...move.users].includes(path))) {
+      if (read(elmRoot, file) === null) return `${file} was deleted, which no move asks for`;
+      if (original(file) === null) return `${file} is a new file, which no move asks for`;
+      for (const { expected, found, part } of movePairs(move, file, original, (path) => read(elmRoot, path))) {
+        const beyond = beyondRename(expected, found, { of: "function" });
+        if (beyond) return part === "function" ? `${move.name} in ${file} is not the function that was moved: ${beyond}` : `${file} changed in more than the move: ${beyond}`;
+      }
+    }
+    return null;
+  },
+
+  // Each file that the removal changes holds what the plan makes of it, and every other file its old
+  // code. The message of a Debug.todo is the session's choice, and so are the brackets around one.
+  "removes-only": ({ removal }, { elmRoot, changed, originals }) => {
+    const original = (file) => (originals.has(file) ? originals.get(file) : read(elmRoot, file));
+    for (const file of new Set([...removal.users, ...changed.filter((path) => path.endsWith(".elm"))])) {
+      const [was, is] = [original(file), read(elmRoot, file)];
+      if (is === null) return `${file} was deleted, which no removal asks for`;
+      if (was === null) return `${file} is a new file, which no removal asks for`;
+      // The plan read the same text when it built the removal, so this reading cannot fail unless the starting commit changed
+      const expected = removal.users.includes(file) ? removedFrom(removal, file, was) : was;
+      if (expected === null) return `${file} cannot be read as the plan read it, so the removal cannot be judged`;
+      const beyond = beyondRename(expected, is, { of: removal.of }, withoutTodoMessages);
+      if (beyond) return `${file} is not what the removal makes of it: ${beyond}`;
+    }
+    return null;
+  },
+
   "file-missing": ({ file }, { elmRoot }) => (existsSync(join(elmRoot, file)) ? `${file} still exists` : null),
 
   "declares-module": ({ file, module }, { elmRoot }) =>
     scan(elmRoot, file)?.module === module ? null : `${file} does not declare the module ${module}`,
 
   "no-import-of": ({ module }, { elmRoot }) => {
-    const importers = files(importersOf(scanProject(elmRoot), module));
+    const importers = filesOf(importersOf(scanProject(elmRoot), module));
     return importers.length > 0 ? `${module} is still imported by ${importers.join(", ")}` : null;
   },
 

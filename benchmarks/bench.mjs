@@ -10,36 +10,47 @@ import { runChecks } from "../mcp-wrapper/doctor.mjs";
 import { RUST_LSP_PATH } from "../mcp-wrapper/lsp-client.mjs";
 import { agentName, ARMS, assertMcpServer, benchmarkVersion, EFFORT_LEVELS, languageServerBuilt, languageServerVersion, serverBuild } from "./lib/agent.mjs";
 import { loadConfig } from "./lib/config.mjs";
+import { widenCheck } from "./lib/entries.mjs";
 import { assertIsolated } from "./lib/isolation.mjs";
-import { planCodebase } from "./lib/plan.mjs";
+import { DEFAULT_LEVELS } from "./lib/levels.mjs";
+import { planCodebase, shortfallLines } from "./lib/plan.mjs";
+import { runProbe } from "./lib/probe.mjs";
 import { assertProcessesVisible, Interrupted, isStopped, LONGEST_TIMEOUT_MS, stopAll } from "./lib/process.mjs";
 import { renderReport, summarize } from "./lib/report.mjs";
-import { plural } from "./lib/tasks.mjs";
+import { plural, TASK_TYPES, triedTargets } from "./lib/tasks.mjs";
 import { executeRun, runId } from "./lib/run.mjs";
 import { closeLeftovers } from "./lib/sandbox.mjs";
 
 const USAGE = `Usage: node benchmarks/bench.mjs <command> --out <dir> [options]
 
-  plan     Pick one target per task type in each codebase and write <out>/plan.json
+  plan     Pick one target per task type and level in each codebase and write <out>/plan.json
   run      Run every planned task in every arm and write one record per session to <out>/runs/
   report   Summarize the records into <out>/report.html and <out>/summary.json
+  entries  Print a check command for each codebase that also compiles the modules nothing imports
+  probe    Call the language server's tools on many targets of each task type, with no agent,
+           and write the verdicts to <out>/probe/ and their counts to <out>/probe.json
 
 Options
   --out <dir>            Where the plan, the records and the report go
-  --config <file>        The codebases to run on (plan and run)
-  --min-files <n>        Fewest files a target must involve (plan, default 5)
+  --config <file>        The codebases to run on (plan, run, entries and probe)
+  --min-files <n>        Fewest files a target must involve (plan and probe, default 5)
+  --levels <list>        Files a target should involve, one target per level (plan, default ${DEFAULT_LEVELS.join(",")}),
+                         or the levels whose tasks to run (run, default every level of the plan)
+  --per-type <n>         Targets per task type and codebase, spread over their sizes, or all (probe, default 30)
   --model <id>           Model for every session (run, default claude-opus-5-5)
   --effort <level>       Effort of every session: ${EFFORT_LEVELS.join(", ")} (run, default Claude Code's for the model)
   --arms <list>          Arms to run (run, default ${Object.keys(ARMS).join(",")})
   --repeat <n>           Sessions per task and arm (run, default 1)
   --concurrency <n>      Sessions running at the same time (run, default 1)
-  --only <text>          Only tasks whose id contains this text (run)
+  --only <text>          Only tasks whose id contains this text (run), or task types whose
+                         <label>/<type> does (probe)
   --max-budget-usd <n>   Spending limit per session (run, default 5)
   --timeout-min <n>      Time limit per session (run, default 20)
   --agent <path>         Claude Code executable (run, default claude)
 
 A run that stops, or is stopped with Ctrl-C, goes on from its last finished
-session when the same command is given again.`;
+session when the same command is given again. So does a probe, from its last
+finished target.`;
 
 class UsageError extends Error {}
 
@@ -84,6 +95,15 @@ function wholeNumber(options, name, fallback) {
   const value = options[name] ?? String(fallback);
   if (!/^[1-9]\d*$/.test(value)) throw new UsageError(`--${name} must be a whole number of 1 or more`);
   return Number(value);
+}
+
+// "100,10,50" as [10, 50, 100]. A level named twice is one level.
+function levelList(options) {
+  const words = options.levels.split(",");
+  if (!words.every((word) => /^[1-9]\d*$/.test(word))) {
+    throw new UsageError(`--levels must be whole numbers of 1 or more, separated by commas, as in ${DEFAULT_LEVELS.join(",")}`);
+  }
+  return [...new Set(words.map(Number))].sort((a, b) => a - b);
 }
 
 const hasRecords = (runsDir) => existsSync(runsDir) && readdirSync(runsDir).some((file) => file.endsWith(".json"));
@@ -204,6 +224,7 @@ function readPlan(out) {
 async function plan(options) {
   const out = resolve(required(options, "out"));
   const minFiles = wholeNumber(options, "min-files", 5);
+  const levels = options.levels === undefined ? DEFAULT_LEVELS : levelList(options);
   const { codebases } = loadConfig(resolve(required(options, "config")));
   // Records are matched to tasks by name. A new plan under old records would pair them with other targets.
   if (hasRecords(join(out, "runs"))) {
@@ -213,9 +234,9 @@ async function plan(options) {
   await closeLeftovers(join(out, "work"), codebases);
 
   // The state of the code that made the plan: what a task expects is written here, and checked later
-  const planned = { minFiles, benchmark: benchmarkVersion(), codebases: [], tasks: [] };
+  const planned = { minFiles, levels, benchmark: benchmarkVersion(), codebases: [], tasks: [] };
   for (const codebase of codebases) {
-    const { codebase: facts, tasks, skipped } = await planCodebase(codebase, { workDir: join(out, "work"), minFiles });
+    const { codebase: facts, tasks, skipped, short } = await planCodebase(codebase, { workDir: join(out, "work"), minFiles, levels });
     planned.codebases.push(facts);
     planned.tasks.push(...tasks);
     // A target is only taken from what the check command compiles, so this says how much of the project was in play
@@ -242,10 +263,12 @@ async function plan(options) {
             : "";
       // One file is named, the one that holds back the most. A project can have hundreds of them.
       const others = heldBack && heldBack.files > 1 ? `, and ${plural(heldBack.files - 1, "other such file holds", "other such files hold")} candidates back too` : "";
-      // Targets that were tried and broke nothing are the nearest cause, whatever else was held back
-      const unbrokenBuild = `. The project still compiled with the change made to ${unbroken === 1 ? "the one target that was" : `each of the ${unbroken} targets that were`} tried, so there was no work to ask for`;
-      // Next come targets that could not be tried at all
-      const notLaidOut = `. The plan adds a variant on a line of its own, as elm-format lays a type out, and ${untried === 1 ? "the one target is" : `none of the ${untried} targets is`} written that way`;
+      // Targets whose trial came out otherwise than it has to are the nearest cause, whatever else was
+      // held back. Next come targets whose trial could not be made at all.
+      const { trial } = TASK_TYPES.find((taskType) => taskType.id === type);
+      const sentence = (text) => `. ${text[0].toUpperCase()}${text.slice(1)}`;
+      const unbrokenBuild = unbroken > 0 ? sentence(trial.vain(triedTargets(unbroken))) : "";
+      const notLaidOut = untried > 0 ? sentence(trial.unmade(untried)) : "";
       // Then the candidates that suited and were left out all the same, each kind with its count
       const kinds = [
         leftOut.outside > 0 && `${leftOut.outside} that an Elm file outside the project can use`,
@@ -266,11 +289,24 @@ async function plan(options) {
                 : tooSmall;
       console.log(`${codebase.label}: no suitable target for ${type}${reason}`);
     }
+    for (const line of shortfallLines(codebase.label, short)) console.log(line);
   }
   // A stop lets the benchmark's own git commands finish, the last one that removes a checkout among them
   if (isStopped()) throw new Interrupted();
   writeJson(join(out, "plan.json"), planned);
   console.log(`Wrote ${join(out, "plan.json")}`);
+}
+
+async function entries(options) {
+  const out = resolve(required(options, "out"));
+  const { codebases } = loadConfig(resolve(required(options, "config")));
+  takeOutputDirectory(out);
+  await closeLeftovers(join(out, "work"), codebases);
+  for (const codebase of codebases) {
+    await widenCheck(codebase, { workDir: join(out, "work"), say: console.log });
+  }
+  // A stop lets the benchmark's own git commands finish, the last one that removes a checkout among them
+  if (isStopped()) throw new Interrupted();
 }
 
 const seconds = (ms) => `${Math.round(ms / 1000)}s`;
@@ -390,10 +426,16 @@ async function run(options) {
         `What its tasks expect may not be what this code checks. Plan again, into another --out where this one holds records.`
     );
   }
-  const tasks = planned.tasks.filter((task) => task.id.includes(options.only ?? ""));
+  const levels = options.levels === undefined ? planned.levels : levelList(options);
+  const unplanned = levels.filter((level) => !planned.levels.includes(level));
+  if (unplanned.length > 0) {
+    throw new Error(`The plan has no level ${unplanned.join(" or ")}. Its levels are ${planned.levels.join(", ")}.`);
+  }
+  const tasks = planned.tasks.filter((task) => task.id.includes(options.only ?? "") && levels.includes(task.level));
   // A text that matches no task is a mistake, and not a run with nothing left to do
   if (tasks.length === 0 && planned.tasks.length > 0) {
-    throw new Error(`No task of the plan has "${options.only}" in its id. The plan's tasks are: ${planned.tasks.map((task) => task.id).join(", ")}`);
+    const asked = [options.only !== undefined && `"${options.only}" in its id`, options.levels !== undefined && `the level ${levels.join(" or ")}`].filter(Boolean);
+    throw new Error(`No task of the plan has ${asked.join(" and ")}. The plan's tasks are: ${planned.tasks.map((task) => task.id).join(", ")}`);
   }
   const jobs = [];
   for (let repetition = 1; repetition <= repeat; repetition++) {
@@ -511,14 +553,30 @@ function report(options) {
   console.log(`Wrote ${join(out, "report.html")}`);
 }
 
+async function probe(options) {
+  const out = resolve(required(options, "out"));
+  const minFiles = wholeNumber(options, "min-files", 5);
+  const perType = options["per-type"] === "all" ? Infinity : wholeNumber(options, "per-type", 30);
+  const { codebases } = loadConfig(resolve(required(options, "config")));
+  takeOutputDirectory(out);
+  await closeLeftovers(join(out, "work"), codebases);
+  console.log(await runProbe({ codebases, out, minFiles, perType, only: options.only ?? "", readJson, writeJson, unfitServer }));
+}
+
 const COMMANDS = {
-  plan: { run: plan, options: ["out", "config", "min-files"], interrupted: "No plan was written." },
+  plan: { run: plan, options: ["out", "config", "min-files", "levels"], interrupted: "No plan was written." },
   run: {
     run,
-    options: ["out", "config", "model", "effort", "arms", "repeat", "concurrency", "only", "max-budget-usd", "timeout-min", "agent"],
+    options: ["out", "config", "model", "effort", "arms", "repeat", "concurrency", "only", "levels", "max-budget-usd", "timeout-min", "agent"],
     interrupted: "Finished sessions keep their records, and the same command picks up from there.",
   },
   report: { run: report, options: ["out"], interrupted: "" },
+  entries: { run: entries, options: ["out", "config"], interrupted: "" },
+  probe: {
+    run: probe,
+    options: ["out", "config", "min-files", "per-type", "only"],
+    interrupted: "Finished targets keep their records, and the same command picks up from there.",
+  },
 };
 
 async function main([command, ...rest]) {

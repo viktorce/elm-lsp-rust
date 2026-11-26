@@ -1,0 +1,1365 @@
+{
+  "languageServer": "0.3.39 (1b4c832ffd09555c1200b217c4f7475d45d8944c)",
+  "minFiles": 5,
+  "codebases": [
+    {
+      "label": "A",
+      "types": [
+        {
+          "type": "rename-function",
+          "tried": 16,
+          "outcomes": {
+            "solved": 16,
+            "wrong-result": 0,
+            "does-not-compile": 0,
+            "tool-error": 0,
+            "tool-refused": 0
+          },
+          "unmet": {},
+          "bands": [
+            {
+              "sizes": "5-9",
+              "tried": 12,
+              "outcomes": {
+                "solved": 12,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "10-19",
+              "tried": 2,
+              "outcomes": {
+                "solved": 2,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "20-49",
+              "tried": 2,
+              "outcomes": {
+                "solved": 2,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            }
+          ]
+        },
+        {
+          "type": "rename-shared-function",
+          "tried": 12,
+          "outcomes": {
+            "solved": 12,
+            "wrong-result": 0,
+            "does-not-compile": 0,
+            "tool-error": 0,
+            "tool-refused": 0
+          },
+          "unmet": {},
+          "bands": [
+            {
+              "sizes": "5-9",
+              "tried": 9,
+              "outcomes": {
+                "solved": 9,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "10-19",
+              "tried": 3,
+              "outcomes": {
+                "solved": 3,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            }
+          ]
+        },
+        {
+          "type": "rename-variant",
+          "tried": 30,
+          "outcomes": {
+            "solved": 30,
+            "wrong-result": 0,
+            "does-not-compile": 0,
+            "tool-error": 0,
+            "tool-refused": 0
+          },
+          "unmet": {},
+          "bands": [
+            {
+              "sizes": "5-9",
+              "tried": 19,
+              "outcomes": {
+                "solved": 19,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "10-19",
+              "tried": 9,
+              "outcomes": {
+                "solved": 9,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "20-49",
+              "tried": 2,
+              "outcomes": {
+                "solved": 2,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            }
+          ]
+        },
+        {
+          "type": "rename-field",
+          "tried": 18,
+          "outcomes": {
+            "solved": 18,
+            "wrong-result": 0,
+            "does-not-compile": 0,
+            "tool-error": 0,
+            "tool-refused": 0
+          },
+          "unmet": {},
+          "bands": [
+            {
+              "sizes": "5-9",
+              "tried": 18,
+              "outcomes": {
+                "solved": 18,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            }
+          ]
+        },
+        {
+          "type": "rename-module",
+          "tried": 30,
+          "outcomes": {
+            "solved": 30,
+            "wrong-result": 0,
+            "does-not-compile": 0,
+            "tool-error": 0,
+            "tool-refused": 0
+          },
+          "unmet": {},
+          "bands": [
+            {
+              "sizes": "5-9",
+              "tried": 1,
+              "outcomes": {
+                "solved": 1,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "10-19",
+              "tried": 3,
+              "outcomes": {
+                "solved": 3,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "20-49",
+              "tried": 19,
+              "outcomes": {
+                "solved": 19,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "50-99",
+              "tried": 1,
+              "outcomes": {
+                "solved": 1,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "200+",
+              "tried": 6,
+              "outcomes": {
+                "solved": 6,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            }
+          ]
+        },
+        {
+          "type": "add-variant",
+          "tried": 6,
+          "outcomes": {
+            "solved": 6,
+            "wrong-result": 0,
+            "does-not-compile": 0,
+            "tool-error": 0,
+            "tool-refused": 0
+          },
+          "unmet": {},
+          "bands": [
+            {
+              "sizes": "5-9",
+              "tried": 6,
+              "outcomes": {
+                "solved": 6,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            }
+          ]
+        },
+        {
+          "type": "rename-type",
+          "tried": 30,
+          "outcomes": {
+            "solved": 30,
+            "wrong-result": 0,
+            "does-not-compile": 0,
+            "tool-error": 0,
+            "tool-refused": 0
+          },
+          "unmet": {},
+          "bands": [
+            {
+              "sizes": "5-9",
+              "tried": 5,
+              "outcomes": {
+                "solved": 5,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "10-19",
+              "tried": 14,
+              "outcomes": {
+                "solved": 14,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "20-49",
+              "tried": 11,
+              "outcomes": {
+                "solved": 11,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            }
+          ]
+        },
+        {
+          "type": "move-function",
+          "tried": 9,
+          "outcomes": {
+            "solved": 9,
+            "wrong-result": 0,
+            "does-not-compile": 0,
+            "tool-error": 0,
+            "tool-refused": 0
+          },
+          "unmet": {},
+          "bands": [
+            {
+              "sizes": "5-9",
+              "tried": 8,
+              "outcomes": {
+                "solved": 8,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "10-19",
+              "tried": 1,
+              "outcomes": {
+                "solved": 1,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            }
+          ]
+        },
+        {
+          "type": "remove-variant",
+          "tried": 30,
+          "outcomes": {
+            "solved": 30,
+            "wrong-result": 0,
+            "does-not-compile": 0,
+            "tool-error": 0,
+            "tool-refused": 0
+          },
+          "unmet": {},
+          "bands": [
+            {
+              "sizes": "5-9",
+              "tried": 21,
+              "outcomes": {
+                "solved": 21,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "10-19",
+              "tried": 7,
+              "outcomes": {
+                "solved": 7,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "20-49",
+              "tried": 2,
+              "outcomes": {
+                "solved": 2,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            }
+          ]
+        },
+        {
+          "type": "remove-field",
+          "tried": 20,
+          "outcomes": {
+            "solved": 20,
+            "wrong-result": 0,
+            "does-not-compile": 0,
+            "tool-error": 0,
+            "tool-refused": 0
+          },
+          "unmet": {},
+          "bands": [
+            {
+              "sizes": "5-9",
+              "tried": 18,
+              "outcomes": {
+                "solved": 18,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "10-19",
+              "tried": 2,
+              "outcomes": {
+                "solved": 2,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "label": "B",
+      "types": [
+        {
+          "type": "rename-function",
+          "tried": 30,
+          "outcomes": {
+            "solved": 30,
+            "wrong-result": 0,
+            "does-not-compile": 0,
+            "tool-error": 0,
+            "tool-refused": 0
+          },
+          "unmet": {},
+          "bands": [
+            {
+              "sizes": "5-9",
+              "tried": 10,
+              "outcomes": {
+                "solved": 10,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "10-19",
+              "tried": 15,
+              "outcomes": {
+                "solved": 15,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "20-49",
+              "tried": 4,
+              "outcomes": {
+                "solved": 4,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "50-99",
+              "tried": 1,
+              "outcomes": {
+                "solved": 1,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            }
+          ]
+        },
+        {
+          "type": "rename-shared-function",
+          "tried": 21,
+          "outcomes": {
+            "solved": 21,
+            "wrong-result": 0,
+            "does-not-compile": 0,
+            "tool-error": 0,
+            "tool-refused": 0
+          },
+          "unmet": {},
+          "bands": [
+            {
+              "sizes": "5-9",
+              "tried": 16,
+              "outcomes": {
+                "solved": 16,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "10-19",
+              "tried": 4,
+              "outcomes": {
+                "solved": 4,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "20-49",
+              "tried": 1,
+              "outcomes": {
+                "solved": 1,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            }
+          ]
+        },
+        {
+          "type": "rename-variant",
+          "tried": 30,
+          "outcomes": {
+            "solved": 30,
+            "wrong-result": 0,
+            "does-not-compile": 0,
+            "tool-error": 0,
+            "tool-refused": 0
+          },
+          "unmet": {},
+          "bands": [
+            {
+              "sizes": "5-9",
+              "tried": 9,
+              "outcomes": {
+                "solved": 9,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "10-19",
+              "tried": 20,
+              "outcomes": {
+                "solved": 20,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "20-49",
+              "tried": 1,
+              "outcomes": {
+                "solved": 1,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            }
+          ]
+        },
+        {
+          "type": "rename-field",
+          "tried": 30,
+          "outcomes": {
+            "solved": 30,
+            "wrong-result": 0,
+            "does-not-compile": 0,
+            "tool-error": 0,
+            "tool-refused": 0
+          },
+          "unmet": {},
+          "bands": [
+            {
+              "sizes": "5-9",
+              "tried": 16,
+              "outcomes": {
+                "solved": 16,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "10-19",
+              "tried": 14,
+              "outcomes": {
+                "solved": 14,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            }
+          ]
+        },
+        {
+          "type": "rename-module",
+          "tried": 30,
+          "outcomes": {
+            "solved": 30,
+            "wrong-result": 0,
+            "does-not-compile": 0,
+            "tool-error": 0,
+            "tool-refused": 0
+          },
+          "unmet": {},
+          "bands": [
+            {
+              "sizes": "5-9",
+              "tried": 2,
+              "outcomes": {
+                "solved": 2,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "10-19",
+              "tried": 4,
+              "outcomes": {
+                "solved": 4,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "20-49",
+              "tried": 21,
+              "outcomes": {
+                "solved": 21,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "50-99",
+              "tried": 3,
+              "outcomes": {
+                "solved": 3,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            }
+          ]
+        },
+        {
+          "type": "add-variant",
+          "tried": 8,
+          "outcomes": {
+            "solved": 8,
+            "wrong-result": 0,
+            "does-not-compile": 0,
+            "tool-error": 0,
+            "tool-refused": 0
+          },
+          "unmet": {},
+          "bands": [
+            {
+              "sizes": "5-9",
+              "tried": 6,
+              "outcomes": {
+                "solved": 6,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "10-19",
+              "tried": 2,
+              "outcomes": {
+                "solved": 2,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            }
+          ]
+        },
+        {
+          "type": "rename-type",
+          "tried": 30,
+          "outcomes": {
+            "solved": 30,
+            "wrong-result": 0,
+            "does-not-compile": 0,
+            "tool-error": 0,
+            "tool-refused": 0
+          },
+          "unmet": {},
+          "bands": [
+            {
+              "sizes": "5-9",
+              "tried": 4,
+              "outcomes": {
+                "solved": 4,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "10-19",
+              "tried": 18,
+              "outcomes": {
+                "solved": 18,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "20-49",
+              "tried": 8,
+              "outcomes": {
+                "solved": 8,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            }
+          ]
+        },
+        {
+          "type": "move-function",
+          "tried": 25,
+          "outcomes": {
+            "solved": 25,
+            "wrong-result": 0,
+            "does-not-compile": 0,
+            "tool-error": 0,
+            "tool-refused": 0
+          },
+          "unmet": {},
+          "bands": [
+            {
+              "sizes": "5-9",
+              "tried": 15,
+              "outcomes": {
+                "solved": 15,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "10-19",
+              "tried": 6,
+              "outcomes": {
+                "solved": 6,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "20-49",
+              "tried": 3,
+              "outcomes": {
+                "solved": 3,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "50-99",
+              "tried": 1,
+              "outcomes": {
+                "solved": 1,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            }
+          ]
+        },
+        {
+          "type": "remove-variant",
+          "tried": 30,
+          "outcomes": {
+            "solved": 30,
+            "wrong-result": 0,
+            "does-not-compile": 0,
+            "tool-error": 0,
+            "tool-refused": 0
+          },
+          "unmet": {},
+          "bands": [
+            {
+              "sizes": "5-9",
+              "tried": 9,
+              "outcomes": {
+                "solved": 9,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "10-19",
+              "tried": 20,
+              "outcomes": {
+                "solved": 20,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "20-49",
+              "tried": 1,
+              "outcomes": {
+                "solved": 1,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            }
+          ]
+        },
+        {
+          "type": "remove-field",
+          "tried": 21,
+          "outcomes": {
+            "solved": 21,
+            "wrong-result": 0,
+            "does-not-compile": 0,
+            "tool-error": 0,
+            "tool-refused": 0
+          },
+          "unmet": {},
+          "bands": [
+            {
+              "sizes": "5-9",
+              "tried": 13,
+              "outcomes": {
+                "solved": 13,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "10-19",
+              "tried": 8,
+              "outcomes": {
+                "solved": 8,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "label": "C",
+      "types": [
+        {
+          "type": "rename-function",
+          "tried": 30,
+          "outcomes": {
+            "solved": 30,
+            "wrong-result": 0,
+            "does-not-compile": 0,
+            "tool-error": 0,
+            "tool-refused": 0
+          },
+          "unmet": {},
+          "bands": [
+            {
+              "sizes": "5-9",
+              "tried": 16,
+              "outcomes": {
+                "solved": 16,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "10-19",
+              "tried": 10,
+              "outcomes": {
+                "solved": 10,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "20-49",
+              "tried": 3,
+              "outcomes": {
+                "solved": 3,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "100-199",
+              "tried": 1,
+              "outcomes": {
+                "solved": 1,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            }
+          ]
+        },
+        {
+          "type": "rename-shared-function",
+          "tried": 1,
+          "outcomes": {
+            "solved": 1,
+            "wrong-result": 0,
+            "does-not-compile": 0,
+            "tool-error": 0,
+            "tool-refused": 0
+          },
+          "unmet": {},
+          "bands": [
+            {
+              "sizes": "5-9",
+              "tried": 1,
+              "outcomes": {
+                "solved": 1,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            }
+          ]
+        },
+        {
+          "type": "rename-variant",
+          "tried": 30,
+          "outcomes": {
+            "solved": 30,
+            "wrong-result": 0,
+            "does-not-compile": 0,
+            "tool-error": 0,
+            "tool-refused": 0
+          },
+          "unmet": {},
+          "bands": [
+            {
+              "sizes": "5-9",
+              "tried": 15,
+              "outcomes": {
+                "solved": 15,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "10-19",
+              "tried": 11,
+              "outcomes": {
+                "solved": 11,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "20-49",
+              "tried": 4,
+              "outcomes": {
+                "solved": 4,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            }
+          ]
+        },
+        {
+          "type": "rename-field",
+          "tried": 30,
+          "outcomes": {
+            "solved": 29,
+            "wrong-result": 0,
+            "does-not-compile": 0,
+            "tool-error": 0,
+            "tool-refused": 1
+          },
+          "unmet": {},
+          "bands": [
+            {
+              "sizes": "5-9",
+              "tried": 18,
+              "outcomes": {
+                "solved": 17,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 1
+              }
+            },
+            {
+              "sizes": "10-19",
+              "tried": 9,
+              "outcomes": {
+                "solved": 9,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "20-49",
+              "tried": 3,
+              "outcomes": {
+                "solved": 3,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            }
+          ]
+        },
+        {
+          "type": "rename-module",
+          "tried": 30,
+          "outcomes": {
+            "solved": 30,
+            "wrong-result": 0,
+            "does-not-compile": 0,
+            "tool-error": 0,
+            "tool-refused": 0
+          },
+          "unmet": {},
+          "bands": [
+            {
+              "sizes": "5-9",
+              "tried": 1,
+              "outcomes": {
+                "solved": 1,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "10-19",
+              "tried": 2,
+              "outcomes": {
+                "solved": 2,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "20-49",
+              "tried": 15,
+              "outcomes": {
+                "solved": 15,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "50-99",
+              "tried": 4,
+              "outcomes": {
+                "solved": 4,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "100-199",
+              "tried": 8,
+              "outcomes": {
+                "solved": 8,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            }
+          ]
+        },
+        {
+          "type": "add-variant",
+          "tried": 10,
+          "outcomes": {
+            "solved": 10,
+            "wrong-result": 0,
+            "does-not-compile": 0,
+            "tool-error": 0,
+            "tool-refused": 0
+          },
+          "unmet": {},
+          "bands": [
+            {
+              "sizes": "5-9",
+              "tried": 7,
+              "outcomes": {
+                "solved": 7,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "10-19",
+              "tried": 3,
+              "outcomes": {
+                "solved": 3,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            }
+          ]
+        },
+        {
+          "type": "rename-type",
+          "tried": 30,
+          "outcomes": {
+            "solved": 30,
+            "wrong-result": 0,
+            "does-not-compile": 0,
+            "tool-error": 0,
+            "tool-refused": 0
+          },
+          "unmet": {},
+          "bands": [
+            {
+              "sizes": "5-9",
+              "tried": 2,
+              "outcomes": {
+                "solved": 2,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "10-19",
+              "tried": 12,
+              "outcomes": {
+                "solved": 12,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "20-49",
+              "tried": 11,
+              "outcomes": {
+                "solved": 11,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "50-99",
+              "tried": 3,
+              "outcomes": {
+                "solved": 3,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "100-199",
+              "tried": 2,
+              "outcomes": {
+                "solved": 2,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            }
+          ]
+        },
+        {
+          "type": "move-function",
+          "tried": 18,
+          "outcomes": {
+            "solved": 18,
+            "wrong-result": 0,
+            "does-not-compile": 0,
+            "tool-error": 0,
+            "tool-refused": 0
+          },
+          "unmet": {},
+          "bands": [
+            {
+              "sizes": "5-9",
+              "tried": 16,
+              "outcomes": {
+                "solved": 16,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "20-49",
+              "tried": 2,
+              "outcomes": {
+                "solved": 2,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            }
+          ]
+        },
+        {
+          "type": "remove-variant",
+          "tried": 30,
+          "outcomes": {
+            "solved": 30,
+            "wrong-result": 0,
+            "does-not-compile": 0,
+            "tool-error": 0,
+            "tool-refused": 0
+          },
+          "unmet": {},
+          "bands": [
+            {
+              "sizes": "5-9",
+              "tried": 21,
+              "outcomes": {
+                "solved": 21,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "10-19",
+              "tried": 9,
+              "outcomes": {
+                "solved": 9,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            }
+          ]
+        },
+        {
+          "type": "remove-field",
+          "tried": 18,
+          "outcomes": {
+            "solved": 18,
+            "wrong-result": 0,
+            "does-not-compile": 0,
+            "tool-error": 0,
+            "tool-refused": 0
+          },
+          "unmet": {},
+          "bands": [
+            {
+              "sizes": "5-9",
+              "tried": 17,
+              "outcomes": {
+                "solved": 17,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            },
+            {
+              "sizes": "10-19",
+              "tried": 1,
+              "outcomes": {
+                "solved": 1,
+                "wrong-result": 0,
+                "does-not-compile": 0,
+                "tool-error": 0,
+                "tool-refused": 0
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

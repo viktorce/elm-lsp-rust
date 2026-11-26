@@ -32,6 +32,9 @@ const ENDINGS = [
 
 const endingOf = (record) => (record.outcome === "agent-failed" ? record.failure : record.outcome);
 
+// A record of a run made before plans had levels has none
+const levelOf = (record) => record.level ?? null;
+
 // The figures of a group of runs. Medians cover every session of the group that has the figure, solved or not.
 function measure(records) {
   return {
@@ -61,6 +64,19 @@ export function summarize(plan, allRecords, arms) {
   const records = allRecords.filter((record) => complete(round(record)));
   const perArm = (subset) =>
     Object.fromEntries(armIds.map((arm) => [arm, measure(subset.filter((record) => record.arm === arm))]));
+  // The files that the target of each codebase involves, in the order of the plan's codebases
+  const targetsOf = (subset) =>
+    plan.codebases
+      .filter(({ label }) => subset.some((record) => record.codebase === label))
+      .map(({ label }) => ({ codebase: label, files: subset.find((record) => record.codebase === label).files ?? null }));
+  // One group per level that a task type has, smallest first
+  const perLevel = (subset) =>
+    [...new Set(subset.map(levelOf))]
+      .sort((a, b) => a - b)
+      .map((level) => {
+        const atLevel = subset.filter((record) => levelOf(record) === level);
+        return { level, targets: targetsOf(atLevel), ...perArm(atLevel) };
+      });
 
   return {
     model: [...new Set(allRecords.map((record) => record.model))].join(", "),
@@ -78,14 +94,15 @@ export function summarize(plan, allRecords, arms) {
       .map(({ label, modules, lines }) => ({ label, modules, lines })),
     arms: armIds.map((id) => ({ id, title: ARMS[id].title })),
     overall: perArm(records),
-    taskTypes: TASK_TYPES.filter((type) => records.some((record) => record.type === type.id)).map((type) => ({
-      id: type.id,
-      title: type.title,
-      ...perArm(records.filter((record) => record.type === type.id)),
-    })),
+    taskTypes: TASK_TYPES.filter((type) => records.some((record) => record.type === type.id)).map((type) => {
+      const ofType = records.filter((record) => record.type === type.id);
+      return { id: type.id, title: type.title, ...perArm(ofType), levels: perLevel(ofType) };
+    }),
     runs: records.map((record) => ({
       codebase: record.codebase,
       type: record.type,
+      level: levelOf(record),
+      files: record.files ?? null,
       arm: record.arm,
       repetition: record.repetition,
       outcome: record.outcome,
@@ -130,6 +147,10 @@ const SHORT_TITLE = {
   "rename-field": "Rename field, shared name",
   "rename-module": "Rename module",
   "add-variant": "Add variant",
+  "rename-type": "Rename type",
+  "move-function": "Move function",
+  "remove-variant": "Remove variant",
+  "remove-field": "Remove field",
 };
 
 const ENDING_TITLE = Object.fromEntries(ENDINGS.map(({ id, title }) => [id, title]));
@@ -196,6 +217,20 @@ th { color: var(--ink-2); font-weight: 500; }
 td.number, th.number { text-align: right; padding-right: 0; padding-left: 12px; }
 tr:last-child td { border-bottom: 0; }
 .note { margin-top: 14px; max-width: 80ch; }
+.levels { display: grid; gap: 12px; margin-top: 12px; }
+.levels .pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px 24px; margin: 12px 0 4px; }
+.levels figure { margin: 0; }
+.levels h3 { font-size: 13px; font-weight: 500; color: var(--ink-2); margin: 0 0 4px; }
+svg.line { min-width: 0; max-width: 560px; }
+svg .trend { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+svg .trend.baseline { stroke: var(--arm-baseline); }
+svg .trend.lsp { stroke: var(--arm-lsp); }
+svg .dot { stroke: var(--surface); stroke-width: 2; }
+svg .dot.baseline { fill: var(--arm-baseline); }
+svg .dot.lsp { fill: var(--arm-lsp); }
+svg .hit:hover + .dot, svg .hit:focus + .dot { opacity: 0.8; }
+.levels td { border-bottom: 0; }
+.levels tr.level td { border-top: 1px solid var(--grid); }
 #tip { position: fixed; pointer-events: none; background: var(--ink); color: var(--surface); padding: 6px 9px;
   border-radius: 6px; font-size: 12px; white-space: nowrap; opacity: 0; transform: translate(-50%, -130%); }
 `;
@@ -353,6 +388,104 @@ function taskChart(summary) {
   );
 }
 
+// Layout of a chart against level, in SVG user units
+const LINE_CHART = { width: 560, height: 200, left: 64, right: 84, top: 14, bottom: 34 };
+
+// How a level is named on the page. Records of a run made before plans had levels have none.
+const levelName = (level) => (level === null ? MISSING : String(level));
+
+/**
+ * One measure of one task type against level, one line per arm. The levels
+ * stand evenly apart, as the plan asks for them, and each point has a tooltip.
+ * The last point of each line has its value beside it.
+ */
+function levelChart(type, arms, unfitted) {
+  const { width, height, left, right, top, bottom } = LINE_CHART;
+  const groups = type.levels.flatMap((level) => arms.map((arm) => level[arm.id]));
+  const panel = unfitted.fitted?.(groups) ?? unfitted;
+  const axis = axisEnd(Math.max(...groups.map((group) => panel.value(group) ?? 0), Number.MIN_VALUE));
+  const plotWidth = width - left - right;
+  const plotBottom = height - bottom;
+  const x = (index) => left + (type.levels.length === 1 ? plotWidth / 2 : (index * plotWidth) / (type.levels.length - 1));
+  const y = (amount) => plotBottom - (amount / axis) * (plotBottom - top);
+
+  const grid = [0, 1, 2, 3, 4]
+    .map((step) => (axis * step) / 4)
+    .map(
+      (amount) =>
+        `<line class="${amount === 0 ? "axis" : "grid"}" x1="${left}" x2="${width - right}" y1="${y(amount)}" y2="${y(amount)}"/>` +
+        `<text class="tick" x="${left - 8}" y="${y(amount) + 4}" text-anchor="end">${escapeHtml(panel.tick(amount, axis))}</text>`
+    )
+    .join("");
+  const levelTicks = type.levels
+    .map((level, index) => `<text class="tick" x="${x(index)}" y="${plotBottom + 18}" text-anchor="middle">${escapeHtml(levelName(level.level))}</text>`)
+    .join("");
+  const lines = arms
+    .map((arm) => {
+      const points = type.levels.map((level, index) => ({ level, index, amount: panel.value(level[arm.id]) })).filter(({ amount }) => amount !== null);
+      const path = points.map(({ index, amount }, at) => `${at === 0 ? "M" : "L"}${x(index)},${y(amount)}`).join(" ");
+      const dots = points
+        .map(({ level, index, amount }) => {
+          const group = level[arm.id];
+          const tip = `${type.title} · level ${levelName(level.level)} · ${arm.title} · ${panel.title}: ${panel.label(group)} (${count(group.sessions, "session")})`;
+          return (
+            `<circle class="hit" tabindex="0" cx="${x(index)}" cy="${y(amount)}" r="10" data-tip="${escapeHtml(tip)}"/>` +
+            `<circle class="dot ${arm.id}" cx="${x(index)}" cy="${y(amount)}" r="4"/>`
+          );
+        })
+        .join("");
+      const last = points.at(-1);
+      const label = last ? `<text x="${x(last.index) + 10}" y="${y(last.amount) + 4}">${escapeHtml(panel.label(last.level[arm.id]))}</text>` : "";
+      return `${points.length > 1 ? `<path class="trend ${arm.id}" d="${path}"/>` : ""}${dots}${label}`;
+    })
+    .join("");
+  const description = `${panel.title} per level of ${type.title}, one line per arm. The table beside it has the figures.`;
+  return (
+    `<figure><h3>${escapeHtml(panel.title)} by level</h3>` +
+    `<svg class="line" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(description)}">${grid}${levelTicks}${lines}</svg></figure>`
+  );
+}
+
+// The figures of a task type per level and arm, with the files that the target of each codebase involves
+function levelTable(type, arms) {
+  const rows = type.levels
+    .map((level) =>
+      arms
+        .map((arm, position) => {
+          const group = level[arm.id];
+          const files = level.targets.map(({ codebase, files }) => `${codebase} ${FORMAT.count(files)}`).join(", ");
+          const shared = position === 0 ? `<td rowspan="${arms.length}">${escapeHtml(levelName(level.level))}</td><td rowspan="${arms.length}">${escapeHtml(files)}</td>` : "";
+          return (
+            `<tr${position === 0 ? ' class="level"' : ""}>${shared}<td><span class="key ${arm.id}"></span>${escapeHtml(arm.title)}</td><td class="number">${FORMAT.solved(group)}</td>` +
+            `<td class="number">${FORMAT.cost(group.costUsd)}</td><td class="number">${FORMAT.time(group.wallMs)}</td><td class="number">${FORMAT.count(group.toolCalls)}</td></tr>`
+          );
+        })
+        .join("")
+    )
+    .join("");
+  return (
+    `<div class="table-card"><table><thead><tr><th>Level</th><th>Files of each target</th><th>Arm</th><th class="number">Solved</th>` +
+    `<th class="number">Median cost</th><th class="number">Median time</th><th class="number">Median tool calls</th></tr></thead><tbody>${rows}</tbody></table></div>`
+  );
+}
+
+/**
+ * Per task type, how each arm fares as the change touches more files: a
+ * chart of cost and one of time against level, and the figures in a table.
+ */
+function levelSection(summary) {
+  const [, cost, time] = PANELS;
+  const cards = summary.taskTypes
+    .map(
+      (type) =>
+        `<section class="card"><h2>${escapeHtml(type.title)}</h2>` +
+        `<p class="lede">A level is the number of files that the plan asked a target to involve. The table has the number that the target of each codebase involves.</p>` +
+        `<div class="pair">${levelChart(type, summary.arms, cost)}${levelChart(type, summary.arms, time)}</div>${levelTable(type, summary.arms)}</section>`
+    )
+    .join("");
+  return `<div class="levels">${cards}</div>`;
+}
+
 // One row per arm, one column per way a session can end
 function endingsTable(summary) {
   const head = ENDINGS.map(({ title }) => `<th class="number">${escapeHtml(title)}</th>`).join("");
@@ -373,6 +506,7 @@ function runsTable(summary) {
       (run) =>
         `<tr><td>${escapeHtml(run.codebase)}</td><td>${escapeHtml(typeTitle[run.type])}</td>` +
         `<td><span class="key ${run.arm}"></span>${escapeHtml(armTitle[run.arm])}</td><td>${escapeHtml(ENDING_TITLE[run.ending])}</td>` +
+        `<td class="number">${escapeHtml(levelName(run.level))}</td><td class="number">${FORMAT.count(run.files)}</td>` +
         `<td class="number">${FORMAT.time(run.wallMs)}</td><td class="number">${FORMAT.cost(run.costUsd)}</td>` +
         `<td class="number">${FORMAT.count(run.turns)}</td><td class="number">${run.toolCalls}</td>` +
         `<td class="number">${run.lspCalls}</td><td class="number">${FORMAT.count(run.changedFiles)}</td>` +
@@ -381,6 +515,7 @@ function runsTable(summary) {
     .join("");
   return (
     `<div class="card table-card"><h2>Every session</h2><table><thead><tr><th>Codebase</th><th>Task</th><th>Arm</th><th>Outcome</th>` +
+    `<th class="number">Level</th><th class="number">Target files</th>` +
     `<th class="number">Time</th><th class="number">Cost</th><th class="number">Turns</th><th class="number">Tool calls</th>` +
     `<th class="number">Server calls</th><th class="number">Files</th><th class="number">API retries</th></tr></thead><tbody>${rows}</tbody></table></div>`
   );
@@ -424,9 +559,10 @@ export function renderReport(summary) {
 ${legend(arms)}
 <div class="tiles">${tiles}</div>
 ${taskChart(summary)}
+${levelSection(summary)}
 ${endingsTable(summary)}
 ${runsTable(summary)}
-<p class="note">Both arms get the same prompt, the same model and the same built-in tools (${BUILT_IN_TOOLS.join(", ")}). The only difference is whether the session has the language server, with its tools and the notes on paths, lines and columns that it sends when a session connects. Each session starts from a fresh checkout with a warm compiler cache. "Out of time" and "Out of budget" are the limits the benchmark was run with. "Session error" is a session that ended on an error of its own, such as a request that grew too long for the model. "Turns" is the number of turns that Claude Code reports for the session, "Server calls" counts the calls to the language server, and "Files" the files the session changed. A module that moved counts twice there, for the file that went and the one that came. "API retries" counts how often Claude Code had to ask the API again, which tells a session that waited from one that worked slowly.</p>
+<p class="note">Both arms get the same prompt, the same model and the same built-in tools (${BUILT_IN_TOOLS.join(", ")}). The only difference is whether the session has the language server, with its tools and the notes on paths, lines and columns that it sends when a session connects. Each session starts from a fresh checkout with a warm compiler cache. "Out of time" and "Out of budget" are the limits the benchmark was run with. "Session error" is a session that ended on an error of its own, such as a request that grew too long for the model. "Level" is the number of files that the plan asked a target to involve, and "Target files" the number that the session's target involves. "Turns" is the number of turns that Claude Code reports for the session, "Server calls" counts the calls to the language server, and "Files" the files the session changed. A module that moved counts twice there, for the file that went and the one that came. "API retries" counts how often Claude Code had to ask the API again, which tells a session that waited from one that worked slowly.</p>
 </main>
 <div id="tip" role="tooltip"></div>
 <script>${SCRIPT}</script>

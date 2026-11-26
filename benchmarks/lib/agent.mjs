@@ -49,7 +49,8 @@ const SERVER_SOURCES = [...BINARY_SOURCES, "mcp-wrapper"];
 // What the benchmark is made of: the code that picks the tasks, runs the sessions and judges them, and
 // the modules of the wrapper that it imports. workspace.mjs decides which source directories and entry
 // files count, harnesses.mjs how a command is quoted and how the server is registered, lsp-client.mjs
-// where the binary lies, and doctor.mjs whether the binary answers.
+// where the binary lies, and doctor.mjs whether the binary answers. The probe calls the tools of
+// tools.mjs, which imports move-function.mjs.
 export const BENCHMARK_SOURCES = [
   "benchmarks/bench.mjs",
   "benchmarks/lib",
@@ -57,6 +58,8 @@ export const BENCHMARK_SOURCES = [
   "mcp-wrapper/errors.mjs",
   "mcp-wrapper/harnesses.mjs",
   "mcp-wrapper/lsp-client.mjs",
+  "mcp-wrapper/move-function.mjs",
+  "mcp-wrapper/tools.mjs",
   "mcp-wrapper/workspace.mjs",
 ];
 

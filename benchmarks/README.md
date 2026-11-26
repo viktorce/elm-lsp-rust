@@ -1,17 +1,17 @@
 # Benchmark: Elm refactoring with and without the language server
 
-Does a coding agent get Elm refactorings right more often, faster or cheaper when it can call this language server? This benchmark runs the same tasks twice, once with the server's MCP tools and once without, and compares.
+Does a coding agent get Elm refactorings right more often, faster or cheaper when it can call this language server? This benchmark runs the same refactoring tasks in two arms, `baseline` without the language server and `lsp` with its MCP tools, and compares the results. Each task asks for a refactoring on one target, a symbol, module or file chosen in a codebase, at a level, a number of files that the target is asked to involve.
 
-It runs on an Elm codebase whose check command keeps to the [check command rules](#check-command-rules). A project whose check command generates Elm sources cannot be benchmarked. Nothing about a codebase is written into this repository. The plan, the transcripts and the run records stay in the output directory, and the report shows counts and measurements only.
+It runs on an Elm codebase whose check command, the command that succeeds when the project compiles, keeps to the [check command rules](#check-command-rules). A project whose check command generates Elm sources cannot be benchmarked. The `entries` command widens a check command so that it compiles modules nothing imports, and the `probe` command runs a tool-only pass, calling the language server's tools directly on many targets with no agent. Nothing about a codebase is written into this repository. The plan, the transcripts, the run records and the probe records stay in the output directory, and the reports show counts and measurements only.
 
-[A run on three codebases](#a-run-on-three-codebases) has the results of one run that I made.
+[The probe](#the-probe) has the results of the tool-only passes on three codebases. [A run on three codebases](#a-run-on-three-codebases) has the results of one agent run that I made before levels and the four newer task types existed.
 
 ## Before your first run
 
-- `run` needs the Claude Code CLI on `PATH`, signed in, a `ps` that lists the machine's processes and, for the `lsp` arm, the language server built with `scripts/setup.sh`. [What a run looks like](#what-a-run-looks-like) has the details.
-- Every session that `run` starts costs what the API charges for it, about `--max-budget-usd` each at most, since a session can go past its limit by the turn that crosses it. Try one task in one arm first, with `--only` and `--arms`, as [What a run looks like](#what-a-run-looks-like) shows.
-- Each session works in a `git worktree` of its own and not in your checkout, though the paths under `link` are your own directories. The benchmark's own git commands add nothing to your repository but those worktrees, which they remove again. They skip its hooks and stage nothing, and the benchmark never prunes your repository's list of worktrees. A session runs shell commands without asking, so run the benchmark on code you trust. [What a session can touch](#what-a-session-can-touch) says what a session shares with your repository.
-- The plan, the transcripts, the records, `run.json` and the report go into the output directory. The checkouts lie among the system's temporary files, and Claude Code can keep the output of a session's tools under `~/.claude/projects/`, as [What a session can touch](#what-a-session-can-touch) says.
+- `run` needs the Claude Code CLI on `PATH`, signed in, a `ps` that lists the machine's processes and, for the `lsp` arm, the language server built with `scripts/setup.sh`. `probe` needs the built language server and starts no agent. `entries`, `plan` and `report` start no agent either. [What a run looks like](#what-a-run-looks-like) has the details.
+- Every session that `run` starts costs what the API charges for it, about `--max-budget-usd` each at most, since a session can go past its limit by the turn that crosses it. Try one task in one arm first, with `--levels`, `--only` and `--arms`, as [What a run looks like](#what-a-run-looks-like) shows. `entries`, `plan`, `report` and `probe` cost nothing.
+- Each session, plan, `entries` pass and `probe` pass works in a `git worktree` of its own and not in your checkout, though the paths under `link` are your own directories. The benchmark's own git commands add nothing to your repository but those worktrees, which they remove again. They skip its hooks and stage nothing, and the benchmark never prunes your repository's list of worktrees. A session runs shell commands without asking, so run the benchmark on code you trust. [What a session can touch](#what-a-session-can-touch) says what a session shares with your repository.
+- The plan, the transcripts, the records, `run.json`, the probe output and the report go into the output directory. The checkouts lie among the system's temporary files, and Claude Code can keep the output of a session's tools under `~/.claude/projects/`, as [What a session can touch](#what-a-session-can-touch) says.
 - What a codebase and its check command have to be is in [The config](#the-config) and the [check command rules](#check-command-rules). What a run cannot measure is in [What it does not tell you](#what-it-does-not-tell-you).
 
 ## What a run looks like
@@ -19,17 +19,26 @@ It runs on an Elm codebase whose check command keeps to the [check command rules
 ```bash
 mkdir -p benchmarks/out
 cp benchmarks/config.example.json benchmarks/out/config.json    # then edit it
-node benchmarks/bench.mjs plan   --config benchmarks/out/config.json --out benchmarks/out
-node benchmarks/bench.mjs run    --config benchmarks/out/config.json --out benchmarks/out --repeat 3
-node benchmarks/bench.mjs report --out benchmarks/out
+node benchmarks/bench.mjs entries --config benchmarks/out/config.json --out benchmarks/out
+node benchmarks/bench.mjs plan    --config benchmarks/out/config.json --out benchmarks/out
+node benchmarks/bench.mjs run     --config benchmarks/out/config.json --out benchmarks/out --repeat 3
+node benchmarks/bench.mjs report  --out benchmarks/out
 open benchmarks/out/report.html
+```
+
+To test the language server's tools directly on many targets without starting an agent, run a tool-only pass with `probe`:
+
+```bash
+node benchmarks/bench.mjs probe   --config benchmarks/out/config.json --out benchmarks/out
 ```
 
 git ignores `benchmarks/out/`, so a config kept there, which names your codebases and where they are, stays out of this repository like everything else about them.
 
-`run` needs the [Claude Code](https://claude.com/claude-code) CLI on `PATH`, signed in, and a `ps` that lists the machine's processes. While sessions of the `lsp` arm are left to do, it also needs the language server built with `scripts/setup.sh`. It uses `claude-opus-5-5` unless `--model` names another model, at the effort that Claude Code picks for that model unless `--effort` names `low`, `medium`, `high`, `xhigh` or `max`. With `--effort`, every session gets that level as `--effort` and as `CLAUDE_CODE_EFFORT_LEVEL`, which takes precedence in a session. Without it, a session gets neither, whatever your shell sets. No session gets the `CLAUDE_CODE_ALWAYS_ENABLE_EFFORT`, `CLAUDE_CODE_MAX_EFFORT_REMINDER`, `MAX_THINKING_TOKENS`, `CLAUDE_CODE_DISABLE_THINKING`, `CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING`, `DISABLE_INTERLEAVED_THINKING` or `CLAUDE_CODE_MAX_OUTPUT_TOKENS` of your shell. Claude Code 2.1.311 reads them to set how the model thinks and how long its answers may grow. They are the ones I found by name in that version, so a variable of the kind that a later version adds reaches the sessions until someone adds it to the list. `node benchmarks/bench.mjs --help` lists every option.
+`run` needs the [Claude Code](https://claude.com/claude-code) CLI on `PATH`, signed in, and a `ps` that lists the machine's processes. While sessions of the `lsp` arm are left to do, it also needs the language server built with `scripts/setup.sh`. It uses `claude-opus-5-5` unless `--model` names another model, at the effort that Claude Code picks for that model unless `--effort` names `low`, `medium`, `high`, `xhigh` or `max`. With `--effort`, every session gets that level as `--effort` and as `CLAUDE_CODE_EFFORT_LEVEL`, which takes precedence in a session. Without it, a session gets neither, whatever your shell sets. No session gets the `CLAUDE_CODE_ALWAYS_ENABLE_EFFORT`, `CLAUDE_CODE_MAX_EFFORT_REMINDER`, `MAX_THINKING_TOKENS`, `CLAUDE_CODE_DISABLE_THINKING`, `CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING`, `DISABLE_INTERLEAVED_THINKING` or `CLAUDE_CODE_MAX_OUTPUT_TOKENS` of your shell. Claude Code 2.1.311 reads them to set how the model thinks and how long its answers may grow. They are the ones I found by name in that version, so a variable of the kind that a later version adds reaches the sessions until someone adds it to the list. `node benchmarks/bench.mjs --help` lists every command and option.
 
-Each session is a Claude Code session that the API charges for. It stops once it has spent `--max-budget-usd`, 5 dollars unless set, or run for `--timeout-min`, 20 minutes unless set. `run` starts one session per task, arm and repetition, and before them the one short session of the isolation check in [Keeping your own setup out](#keeping-your-own-setup-out). `plan` and `report` start no session. To try a run small first, `--only rename-function` runs the tasks of that type alone, and `--arms baseline` runs one arm.
+`plan --levels <list>`, with `10,50,100` as the default, picks one target per task type, codebase and level, and writes `levels`, each task's requested `level` and its target's `files` into `<out>/plan.json`. Each task gets the id `<label>/<task type>/<level>`, and each session writes its record, transcript and patch under `<label>--<task type>--<level>--<arm>--<repetition>` with `.json`, `.jsonl` and `.patch` in `<out>/runs/`. Each run record holds both `level` and `files`.
+
+Each session is a Claude Code session that the API charges for. It stops once it has spent `--max-budget-usd`, 5 dollars unless set, or run for `--timeout-min`, 20 minutes unless set. `run` starts one session per task, arm and repetition, and before them the one short session of the isolation check in [Keeping your own setup out](#keeping-your-own-setup-out). `entries`, `plan`, `report` and `probe` start no session. To try a run small first, `--levels 10` runs the tasks of that level alone, `--only rename-function` runs every level of that task type, and `--arms baseline` runs one arm. `run --levels <list>` refuses any level that the plan lacks.
 
 What `run` holds a run to, and how it resumes:
 
@@ -38,7 +47,7 @@ What `run` holds a run to, and how it resumes:
 - Every session starts from the commit the plan was made on, even when `ref` has moved since.
 - The first `run` writes its model, its effort, its two limits, the version of Claude Code that its first session reported and the state of the benchmark's own code to `<out>/run.json`, and a later one that differs is refused, because its sessions would be compared with the ones on record. A run without `--effort` is held to Claude Code's default, so a later one with `--effort` is refused as well. A run with sessions of the `lsp` arm left to do writes the language server's version with the state of its sources there as well. A later run is held to that server from the first recorded session of the `lsp` arm on. A run before that is held to none, and so is a run after a run of the `lsp` arm that recorded nothing, as when its first session lost the API. A run with no session of the `lsp` arm left to do needs no server. It is not checked against one, and it leaves the server in `run.json` as it is, so the lsp sessions of a later run are still held to it.
 - Claude Code can update itself between two runs and while one is under way. A session that reports another version than the run began with stops the run, so keep one version installed until a run is done. Every session starts with `DISABLE_AUTOUPDATER=1` in its environment. Claude Code's documentation says that the variable turns off its automatic updates in the background while `claude update` still works. It also says that a Homebrew installation does not update itself. The documentation puts the variable in the `env` of `settings.json`, which a session does not read, so the benchmark sets it for each session.
-- The state of the code is the last commit that changed `benchmarks/bench.mjs`, `benchmarks/lib/` or one of the modules of `mcp-wrapper/` that the benchmark imports, `doctor.mjs`, `errors.mjs`, `harnesses.mjs`, `lsp-client.mjs` and `workspace.mjs`, with a digest of what is not committed there. The state of the language server's sources is read the same way.
+- The state of the code is the last commit that changed `benchmarks/bench.mjs`, `benchmarks/lib/` or one of the modules of `mcp-wrapper/` that the benchmark imports, `doctor.mjs`, `errors.mjs`, `harnesses.mjs`, `lsp-client.mjs`, `move-function.mjs`, `tools.mjs` and `workspace.mjs`, with a digest of what is not committed there. The state of the language server's sources is read the same way.
 - A run is not held to the time the server's binary was built, because `run` does not start the `lsp` arm with a binary that is older than the files that cargo lists beside it as its sources, so a build of the same sources is the same server. That check reads the Rust sources alone. A change to `Cargo.toml` or `Cargo.lock` that was not built is not seen, so run `scripts/setup.sh` after one. `run` also refuses the `lsp` arm where cargo's list is missing, or names no file that is still there, as after the checkout was moved, because then nobody knows what the binary was built from. `scripts/setup.sh` writes that list.
 - Before the isolation check and the first session, a run with lsp sessions left starts the binary once and asks it what every tool call asks, as `node mcp-wrapper/cli.mjs doctor` does. It stops with the doctor's report when a check there fails. It then starts the MCP server the way a session of the arm gets it, the same command with the same environment, and asks it for its tools. A server that does not start, does not answer within ten seconds or lists no tool stops the run before the isolation check, since a `node` on `PATH` that is too old for the wrapper would otherwise cost every session of the arm. The wrapper starts the binary only at a session's first tool call, so a binary that cannot start would make each session of the arm a baseline whose tool calls fail. An `elm` or `elm-format` that is missing from `PATH` is a warning there and does not stop the run, since a codebase can pin its own.
 - Each session of the `lsp` arm starts the server afresh from this checkout, so leave the checkout as it is while a run goes on. Build nothing there, and edit neither the server's sources nor `mcp-wrapper/`. `run` checks the server again before each of those sessions and once each has ended, since the wrapper starts the binary at a session's first tool call and again after ten idle minutes. A difference from the server it began with stops the run without a record for the session that was about to start or had just ended, and leaves no transcript or patch of it.
@@ -77,26 +86,76 @@ Every source directory of `elm.json` has to lie inside `elmRoot`. The benchmark 
 ## Check command rules
 
 - It has to name the Elm files it compiles, as `src/Main.elm` above, because the benchmark works out from them which modules the compiler reads. Each of them has to be a word of its own. One that is named inside a longer word, as in the script of `["sh", "-c", "elm make src/Main.elm"]`, does not count.
-- It must not pass `--optimize`, which rejects the `Debug.todo` one task asks for.
+- It must not pass `--optimize`, which rejects the `Debug.todo` three tasks ask for.
 - It must name no path inside the repository by its whole path, also behind an option such as `--output=`, in the script of `sh -c` and through a link that leads into the repository, to a file that does not exist yet as well, because a session works in a checkout of its own and the command would run or write your copy. The benchmark tells a directory by what it is, so a path in another letter case on a file system that ignores case, one with an accented name in the other Unicode form, or one under `/System/Volumes/Data` on macOS is refused like the plain one. Name the compiler as `./node_modules/.bin/elm` and list `node_modules` under `link`.
 - It must write no file that the repository holds, a committed bundle for instance. A changed file of that kind counts against a session, so a session that ran the command would be judged differently from one that did not, and `plan` stops when the command writes such a file, also when it writes the bytes that are there. A build that writes its output only once the sources have changed, as `make` does, is not caught that way, so make sure of it yourself.
 - It must write no Elm source either, whatever the text, because such a file counts against a session in the same way. A generated module can hold a digest of another module or what `git describe --dirty` prints, and then a session's edits change it and an unchanged checkout does not. `plan` stops when the first build of a fresh checkout writes an Elm file, and when a second build of the unchanged checkout writes one that the first did not. So a project whose check command generates Elm sources cannot be benchmarked. Commit what the generator writes, and leave the generator out of `check`. `--output=/dev/null` writes none.
 - The benchmark reads the words of the command and cannot see a path that a script builds as it runs, from `$HOME` or `~` for one, or a path in a script file that the command names, so make sure that none of those leads into the repository.
 - It reads a path with a space in it, as under a directory called `My Projects`, also behind an option and in the script of `sh -c`, where the shell needs such a path in quotes. It does not see a space written as `\ `, a path whose quotes end in the middle of it, as in `--output="/x/My Stuff"/app/x.js`, or a path behind `@`, as in `@/x/app/args.txt`, so make sure of such a path yourself.
 
+### Widening a check command
+
+A check command that names a single entry file leaves every module nothing imports uncompiled. Because `plan` leaves out any target that involves an uncompiled file, a narrow check command holds back large targets. The `entries` command finds modules that can be added to `check`:
+
+```bash
+node benchmarks/bench.mjs entries --config benchmarks/out/config.json --out benchmarks/out
+```
+
+For each codebase, `entries` opens a checkout of its own as `plan` does, finds every module that the check command does not compile and that no non-test module imports, runs the check command once for each with that module in place of the entry files, and keeps the ones that compile. It then runs the check command once with all kept modules added and says whether that build passes. It prints how many modules the command compiles before and after, how many candidates failed to compile on their own, and the `check` array to paste into the config.
+
+- Modules under `tests/` do not compile with `elm make`. `entries` leaves them out and prints how many they are, noting that `check` can build them with a test runner.
+- A check command that names no Elm file as a word of its own cannot be widened this way. `entries` says so and moves on to the next codebase.
+- Where modules each compile alone and fail together, `entries` says so and does not offer the array as fit for the config.
+- `entries` takes `<out>/lock` and uses `<out>/work` like `plan`, and handles interrupts in the same way.
+
+A check command that builds tests alongside `elm make` can be written as one command with the entry files as words of their own:
+
+```json
+["sh", "-c", "./node_modules/.bin/elm make \"$1\" --output=/dev/null && shift && ./node_modules/.bin/elm-test make --compiler ./node_modules/.bin/elm \"$@\"", "sh", "src/Main.elm", "tests/A.elm", "tests/B.elm"]
+```
+
+`plan` accepts this form, and every file named as a word counts as an entry.
+
+Measured on the three real codebases A, B and C, a check command that named one entry file left 132, 25 and 94 modules uncompiled, and the largest usable module rename involved 45, 37 and 113 files. With the modules that compile on their own added, 83 in A and 59 in C, and with B's 25 test modules built by a test runner, the largest usable module rename involved 220, 90 and 159 files.
+
 ## The tasks
 
-`plan` picks one target per task type in each codebase. It prefers a target that involves about ten files, or five for the add-variant task, and `--min-files` sets the fewest it accepts. Which files a target involves depends on the task. For a rename they are other files than the one that declares the target. A module involves the files that import it. A function or a variant involves the importers that name it: through the module's name or alias, or bare where the import exposes it, which for a variant is where the import takes the variants of its type along. No other file can name a function or a variant that its module does not expose, so such a one involves no file and is no target. A field involves the importers of the record's module that name both the record and the field. The add-variant task involves the files with a branch on one of the type's variants, the one that declares the type among them, and that one alone where its module keeps the variants to itself. That count is an upper bound of the files the task changes, since a case that ends in a catch-all needs no new branch. A variant called like its own type, as in `type Email = Email String`, is no target, because the tokens of a use do not tell the type from the variant. Functions are found by their type annotations, so a function without one is no target and no namesake.
+`plan --levels <list>`, with `10,50,100` as the default, picks one target per task type, codebase and level. A level is a number of files that a target involves. `--min-files`, 5 unless set, sets the fewest files any target may involve.
 
-A function, a variant or a field is a target only when its name has four letters or more. A shorter one is too often the name of something else in the same files, which the comparison of tokens cannot tell from it. A target whose new name, the old one with `Renamed` behind it, stands anywhere in the project's code already is no target either, since the renamed target could clash with it. That holds for a function without a type annotation, a record alias and a local variable alike, and for a module where the last part of its new name stands there. A module is no target where anything lies at the path of its new file already, because the move would write over it. That holds for a file without a module line, which the benchmark does not read as a module, and for a link whose end is gone. On a file system that ignores letter case, it holds for a name that differs in case alone.
+For each task type and codebase, over the targets that pass every filter, `plan` picks targets by these rules:
+
+- The top level takes the smallest target at or above the highest number. Where none reaches it, the top level takes the largest target there is.
+- The bottom level takes the target nearest to the lowest number, among targets smaller than the top level's target.
+- A level between them aims at its own number where that is below the size of the top level's target. Where it is not, its aim is spaced by ratio between the sizes of the bottom target and the top one, by the level's place among the levels.
+- A level between them takes no target that lies nearer, by ratio, to a neighbour's target than to its own aim. Sizes 10, 11, 12 and 300 give two levels, 10 and 300.
+- Each level's target involves fewer files than the one above and more than the one below. A level that cannot get such a target is left out, so a task type whose targets are all small ends up with two levels or one.
+- With one level alone, that level follows the top level's rule.
+
+Four task types, `add-variant`, `move-function`, `remove-variant` and `remove-field`, require a trial build before `plan` takes a target. `plan` builds each candidate target once whichever level tries it, and each level gives up after five targets tried in vain. For a task type that gets some levels and not all, `plan` prints which levels it got with their file counts, which levels it missed, its largest target, any trial failures, and where uncompiled files hold larger candidates back, the uncompiled file that holds back the most and a pointer to `entries`.
+
+Which files a target involves depends on the task:
+
+- For `rename-module`, the files that import the module.
+- For `rename-function` and `rename-shared-function`, the importers that name the function, through the module's name or alias, or bare where the import exposes it.
+- For `rename-variant`, the importers that name the variant, qualified or bare where the import takes the type's variants along. A variant called like its own type, as in `type Email = Email String`, is no target, because the tokens of a use do not tell the type from the variant.
+- For `rename-type`, the importers that name the type, qualified or bare where the import exposes it by name, with `(..)` or with everything.
+- For `rename-field`, the importers of the record's module that name both the record alias and the field.
+- For `add-variant`, the files with a branch on one of the type's variants, the declaring file among them, and that file alone where its module keeps the variants to itself. That count is an upper bound of the files the task changes, since a case that ends in a catch-all needs no new branch.
+- For `move-function`, the modules other than the source module that call the function or list it in their import of the source module.
+- For `remove-variant`, the files that the removal changes, the declaring file among them, plus each importer that names the variant through the module's qualifier or bare where its import takes the type's variants along.
+- For `remove-field`, the files that read the field or build or update a record with it, the declaring file among them.
+
+No other file can name a function, type or variant that its module does not expose, so such a one involves no file and is no target for rename. Functions are found by their type annotations, so a function without one is no target and no namesake.
+
+A function, type, variant or field is a target only when its name has four letters or more. A shorter one is too often the name of something else in the same files, which the comparison of tokens cannot tell from it. For renames and removals, a target whose new name, the old one with `Renamed` behind it, stands anywhere in the project's code already is no target either, since the renamed target could clash with it. That holds for a function without a type annotation, a record alias and a local variable alike, and for a module where the last part of its new name stands there. A module is no target where anything lies at the path of its new file already, because the move would write over it. That holds for a file without a module line, which the benchmark does not read as a module, and for a link whose end is gone. On a file system that ignores letter case, it holds for a name that differs in case alone. In a Lamdera project, `plan` leaves out the four modules Lamdera looks for by name, `Env`, `Types`, `Frontend` and `Backend`, for `rename-module`, and the six types Lamdera looks for in `Types`, `FrontendModel`, `BackendModel`, `FrontendMsg`, `BackendMsg`, `ToBackend` and `ToFrontend`, for `rename-type`.
 
 A target is only taken when the check command compiles its file and every file the change can break. The compiler says nothing about a module it never reads, so a reference left behind in one would pass. In practice that leaves out whatever your test modules import, unless `check` builds the tests too. `plan` prints how many of the project's modules the check command compiles. When a task type ends up without a target, it names the uncompiled file that held back the most candidates and says how many more such files there are. A Lamdera app has many: the snapshots and migrations under `src/Evergreen/` name the app's types and fields, and a check that builds `Frontend.elm` and `Backend.elm` compiles none of them. Most of its fields and many of its functions are no targets for that reason.
 
-The benchmark reads the modules in the source directories of `elm.json` and in `tests/`. An Elm file anywhere else under `elmRoot`, such as an example with an `elm.json` of its own, can import the same modules, and no check compiles it. A target that such a file can use is left out, and `plan` prints how many those were.
+The benchmark reads the modules in the source directories of `elm.json` and in `tests/`. An Elm file anywhere else under `elmRoot`, such as an example with an `elm.json` of its own, can import the same modules, and no check compiles it. A target that such a file can use is left out, and `plan` prints how many those were. For `move-function`, an Elm file outside the project that imports the destination excludes the target too.
 
 A source file can be a link to another file of the project, `src/Lib.elm` to `shared/Lib.elm`. git reports a change to it under the name of the file the link leads to. A target that involves such a file is left out as well, and `plan` prints how many those were.
 
-One more kind of target is left out, a field that an extensible record type names anywhere in the project, `{ a | name : String }`. A function with such a type takes every record that has the field, so the field cannot be renamed on one of them alone.
+For `rename-field`, `plan` also leaves out a field that an extensible record type names anywhere in the project, `{ a | name : String }`. A function with such a type takes every record that has the field, so the field cannot be renamed on one of them alone.
 
 | Task | The agent is asked to | Solved when the project compiles and |
 |------|----------------------|--------------------------------------|
@@ -106,20 +165,25 @@ One more kind of target is left out, a field that an extensible record type name
 | Rename field, shared name | rename a record field whose name at least two other records also have | the alias has the new field and not the old one, and the other records still have theirs |
 | Rename module | rename a module and move its file | the old file is gone, the new file declares the new module, nothing imports the old name, and only its importers changed. A type of the module's own name keeps that name |
 | Add variant | add a variant as the last one of a custom type with three variants or more, and a `Debug.todo` branch for it wherever the compiler asks | the variant is the last of its type, no other type got the variant, every changed line is the variant, a branch that names it or the branch's body, which is `Debug.todo` with a string literal, and only files that import the module changed. A catch-all branch or a rewritten one fails. `plan` only accepts a type where adding the variant breaks the build |
+| Rename type | rename a custom type or a type alias `T` to `TRenamed` and update every place that names it | the file declares `TRenamed` and not `T`, other modules' types called `T` still exist, every variant called `T` still exists with the type's own now on `TRenamed`, and only the module and its importers changed |
+| Move function | move a function and its annotation from source module `S` to destination module `D`, with every import change spelled out | `D` declares the function and `S` does not, `S`, every user and `D` outside the function match the plan's move token by token, the function in `D` keeps its tokens once qualified names are read as whole module names, and only `S`, `D` and the users changed |
+| Remove variant | remove a variant from a custom type, remove every `case` branch that matches on it, and replace every other use with `Debug.todo` | the type no longer has the variant, every changed file matches the plan's removal token by token with `Debug.todo` messages, brackets and `<|` free, and every other changed Elm file keeps its tokens |
+| Remove field | remove a field from a record type alias, remove it from record literals and updates, and replace every read or accessor with `Debug.todo` | the alias no longer has the field, every changed file matches the plan's removal token by token with `Debug.todo` messages, brackets and accessor lambda argument names free, and every other changed Elm file keeps its tokens |
 
 Every request ends with "Change nothing else", so the verdict holds a session to nothing that the request leaves unsaid.
 
-For each of the five renames, every changed Elm file is also compared with what it was, token by token. Apart from layout and comments, only the name may differ. A text replace that reaches into a string literal changes what the program says, and it fails here while the compiler lets it through. The module line and each import are compared on their own, in any order, so an alias that moved from one import to another fails too.
+For each of the six renames, every changed Elm file is also compared with what it was, token by token. Apart from layout and comments, only the name may differ. A text replace that reaches into a string literal changes what the program says, and it fails here while the compiler lets it through. The module line and each import are compared on their own, in any order, so an alias that moved from one import to another fails too.
 
 Where the name may differ depends on what is renamed:
 
 - A function's name changes in the code and in what a module line or an import exposes.
+- A type's name changes in the code only where no dot follows it, and in a module line or an import only inside the exposing list. A module called `T` and an import alias `as T` keep their names, and so does a variant called `T`, the type's own included, which stays on `TRenamed`. Where a namesake variant or another module's type of the same name exists, the request says so.
 - A variant's name and a field's change in the code only. An import alias of the variant's name, as in `import Page.Settings as Settings`, keeps its own. In a field rename, a variable that a record pattern binds takes the new name, which the request says.
 - A module's name changes in front of a dot, and in a module line or an import outside of what that exposes. A type of the same name, as in `module User exposing (User)`, keeps its own.
 
 A rename creates no Elm file and deletes none. The one exception is the file of the module that a module rename moves. Its new path must not be one that the starting commit holds. A move over such a file loses what the file held, and it is a wrong result even where the project compiles.
 
-A declaration of another kind that shares the target's name has to keep it as well: a record alias with a field called like the function, a type called like the variant, a function called like the field. A text replace renames those along, and the project still compiles when it does so everywhere.
+A declaration of another kind that shares the target's name has to keep it as well: a record alias with a field called like the function, a type called like the variant, a variant called like the type, a function called like the field. A text replace renames those along, and the project still compiles when it does so everywhere.
 
 The comparison reads tokens and no types, so some things get past it. Each shares the target's name, was renamed along with it in a file the task may change, and left the project compiling: a local variable, a type variable, a field of a record that has no alias or of an extensible alias, a port, and a function without a type annotation. In a module rename, an import alias that equals the last part of the module's name gets past it the same way, be it the module's own alias or another import's.
 
@@ -130,11 +194,33 @@ The add-variant verdict reads an added variant and its branches by these rules:
 - The variant can stand behind its bar with a space or without one, as in `| Square` and `|Square`.
 - A pattern can go on over several lines while one of its brackets is open, and its arrow stands on the line where the pattern ends, as elm-format puts it. The compiler also takes an arrow on a line of its own. The verdict does not read that as the end of a pattern, and such a branch fails the task.
 - A branch ends with its body. The first line of code below the body must not be indented deeper than the branch's pattern, because by Elm's layout rule such a line goes on with the body. A branch put between a body and its last lines compiles, takes those lines over from the branch above, and fails the task.
-- A comment in an added branch or beside it is one more thing that changed, and fails the task. That holds on a line of its own, behind the arrow, in the body and behind the new variant. The five renames leave comments out of the comparison altogether.
+- A comment in an added branch or beside it is one more thing that changed, and fails the task. That holds on a line of its own, behind the arrow, in the body and behind the new variant. The six renames leave comments out of the comparison altogether.
 - The one exception is a comment in front of the arrow that begins and ends on one line of the pattern. It is passed over, because a pattern is read line by line without its comments. A block comment that goes on over two lines of a pattern fails like the rest.
 - The variant goes onto the one type that the request names. A type of the same name in another module would take it as well, and the project would compile.
 - A branch that a session adds to a case which already had a catch-all passes as well, though the compiler did not ask for it.
 - In a file that does not end with a line break, a branch added at its very end fails when its body repeats the body above it, because git then shows the line above as the added one. elm-format ends every file with a line break.
+
+The move-function task picks a destination and builds the move in `lib/move.mjs`, keeping the target only if the project compiles:
+
+- The request spells out every import change so the task needs no judgment. `D` exposes `f` from then on and `S` does not. Qualified calls use `D`'s qualifier. Bare calls stay bare. Their module imports `f` by name from `D`, added to its import of `D` or as a new `import D exposing (f)`, and takes `f` out of its import of `S`, dropping the word `exposing` where the list would be empty. A module that calls `f` qualified and does not import `D` gets `import D`. `D` gets a plain `import M` for every module the function needs and `D` lacks, and those names are written with the module's whole name. Every other name of another module uses `D`'s import of that module, staying bare where `D`'s import exposes it and taking `D`'s qualifier otherwise. Every other import stays, also one the move leaves unused.
+- `plan` leaves out a module that exposes only `f`, a function that uses unexposed names of its module or a type exposed without its variants, a bare name of its own module that some import also gives, a bare name that several imports expose, and a qualifier that stands for several modules.
+- The destination must be compiled by the check command, must not mention `f`, and must not declare or import any bare name the function uses. No new import may close a cycle or clash with an alias. Among the destinations that remain, `plan` prefers the fewest modules gaining an import, then the fewest new imports in `D`, then the first path.
+- The verdict checks that `D` declares `f` and `S` does not. It compares `S`, every user and `D` outside the function against the plan's move token by token, and checks that the function in `D` keeps its original tokens once qualified names are read as whole module names. Placement, layout and comments, the doc comment included, are free. Only `S`, `D` and the users may change, no file may be created or deleted, and only Elm files may change.
+- A name written bare where `D`'s import lists it by name passes, though the request asks for the qualifier. A name that was qualified in `S` and is written bare through a `(..)` import of `D` fails, though it compiles.
+
+The two removal tasks, `remove-variant` and `remove-field`, replace constructions or reads with `Debug.todo`. Both were first tried in a stricter form and left out. On the three real codebases, every variant that code matches in 5 files or more is also constructed somewhere, and a field that is set and never read involves at most 4 files. For both tasks, `plan` reads the source in `lib/remove.mjs` and runs two trial builds before taking a target. The removal itself must compile, and renaming the target wherever `plan` reads a use of it must compile too. The trial rename catches any use that `plan` missed or misread.
+
+The remove-variant task and its verdict follow these rules:
+
+- The request asks to remove the variant from its custom type and remove every `case` branch whose pattern names it, also inside a tuple or another variant's pattern as in `( V, _ )` or `Just V`. A `case` left with one branch stays a `case`. Every other use of the variant, qualified or bare, becomes `Debug.todo` with a string literal. Where arguments follow directly, as in `V a b`, the whole application goes. Elsewhere, as in `List.map V items` or `V <| a`, only the name goes. Every other function, variable and import stays as it is, also one the removal leaves unused.
+- `plan` leaves out a custom type with only one variant, a variant whose name another type of the project also has, and a variant called like one every module has, `True`, `False`, `Just`, `Nothing`, `Ok`, `Err`, `LT`, `EQ` or `GT`. The trial build leaves out a variant whose removal leaves a redundant catch-all branch. `plan` also leaves out a construction followed by an unbracketed lambda as its last argument, a `case` with its first branch on the line of `of`, and a file whose brackets do not pair up. Elm rejects a partial pattern in a function argument, lambda or `let`, so a type with two variants or more has no such pattern.
+- The verdict checks that the project compiles, the type no longer has the variant, every changed file matches the plan's own removal token by token, and every other changed Elm file keeps its tokens. Comments, `@docs` lines, layout, the order of imports and exposing lists, the message of each `Debug.todo`, brackets around the call and a `<|` handing it the message are free. Only Elm files of the project may change.
+
+The remove-field task and its verdict follow these rules:
+
+- The request asks to remove the field from its record type alias and take it out, with its value, from every record literal built with it and every update that sets it. An update that sets no other field, `{ r | f = x }`, becomes `r`. Every read becomes `Debug.todo` with a string literal. A read with a dot, `user.f` or `(get id).f`, goes together with the record in front of the dot, while reads behind it stay so `user.f.next` becomes `(Debug.todo "...").next`. An accessor `.f`, also in `user |> .f`, becomes a function that ignores its argument, `\_ -> Debug.todo "..."`. Every other function, variable and import stays as it is, also one the removal leaves unused. The request states that no other record type of the project has the field, no record pattern names it and no code calls the alias as a function.
+- `plan` leaves out an alias with only one field, a field whose name appears as a label in any other record type of the project, an alias, annotation, extensible record or variant argument, and a field named by any record pattern `{ f }` or `{ a, f }`. It also leaves out an alias whose name appears in code as a value, such as a constructor in a decoder or a variant of the same name, and a field where a record literal built with it has other fields than the alias, such as a package record. The trial rename also rules out a read of the field on a package record. Because a field travels through values, every file that names it must be compiled by the check command.
+- The verdict checks that the project compiles, the alias no longer has the field, every changed file matches the plan's own removal token by token, and every other changed Elm file keeps its tokens. Comments, layout, the message of each `Debug.todo`, brackets around it, the name of the accessor lambda's argument and brackets around the lambda are free. A plain `Debug.todo` or `always (Debug.todo ...)` in place of an accessor fails. A string with the field's name, such as a JSON key in a decoder or encoder, is no read and must stay. Only Elm files of the project may change.
 
 A task changes Elm files of the project and nothing else, by these rules:
 
@@ -146,7 +232,26 @@ A task changes Elm files of the project and nothing else, by these rules:
 - What the commit holds there counts like any other file, and so does a module in a source directory of the project that lies there, as where `elm.json` lists a package that came through npm.
 - The page that `elm make` writes without `--output`, the output of your own check command or a note that a session left changes nothing about the project.
 
-Both the choice of targets and the verdict come from `lib/elm-source.mjs` and from the project's own compiler. That module reads declarations from the source text, whatever their layout, and leaves comments and string literals out. The language server takes no part in either, so it cannot grade its own work.
+Both the choice of targets and the verdict come from `lib/elm-source.mjs`, `lib/move.mjs`, `lib/remove.mjs` and the project's own compiler. Those modules read declarations and tokens from the source text, whatever their layout, and leave comments and string literals out. The language server takes no part in either, so it cannot grade its own work.
+
+### What plan gets with levels
+
+With the default levels `10,50,100` and widened check commands on the three real codebases A, B and C, `plan` produces 81 tasks: 25 in A, 29 in B and 27 in C. Each cell below lists the file counts of the targets picked for each level. A task type with fewer than three numbers got fewer levels.
+
+| Task type | A | B | C |
+|-----------|---|---|---|
+| rename-function | 10, 16, 27 | 10, 39, 63 | 10, 34, 110 |
+| rename-shared-function | 10, 16 | 10, 13, 27 | 7 |
+| rename-variant | 10, 15, 22 | 10, 14, 20 | 10, 16, 34 |
+| rename-field | 7, 8 | 10, 12, 18 | 10, 18, 26 |
+| rename-module | 10, 45, 209 | 10, 51, 90 | 10, 49, 113 |
+| add-variant | 5, 7 | 12, 15 | 8, 14, 19 |
+| rename-type | 10, 19, 37 | 10, 21, 43 | 10, 46, 103 |
+| move-function | 9, 12 | 11, 40, 63 | 9, 20, 30 |
+| remove-variant | 10, 15, 23 | 10, 14, 21 | 10, 13, 17 |
+| remove-field | 7, 18 | 9, 11, 17 | 9, 10 |
+
+No agent run with levels has been made.
 
 ## The two arms
 
@@ -199,13 +304,13 @@ The worktree is a directory named after the repository, alone in a new directory
 - A session over its time limit gets the signal that Ctrl-C sends. Claude Code then ends its shell commands and reports what the session cost. Whatever is still there five seconds later is killed.
 - Ctrl-C, `kill` and a closed terminal end the builds and the sessions under way in that same way and remove their worktrees. The benchmark's own git commands run outside the terminal's process group, so an interrupt lets each of them finish. No further session starts. An interrupted session leaves no record, transcript or patch, so the next `run` starts it again. A second Ctrl-C does not wait the five seconds.
 - An error that nothing in the benchmark catches ends what is running in the same way. Its message goes to stderr, and the benchmark exits with 130 as an interrupted run does, so the records of finished sessions stay and nothing else is left. That happens when the reader of the output goes away, as with `run ... | head -n 2`, where a later line that `run` prints meets a closed pipe. Where every session had ended by then, nothing is interrupted, and the benchmark exits with 1.
-- A benchmark that is killed outright, as with `kill -9`, ends nothing. Its sessions run on until they finish, and its worktrees stay behind among the temporary files. `<out>/work` remembers where each one is, and the next `plan` or `run` on that output directory removes each one of a codebase that the config still names, also the one of a session that has its record. A checkout of a codebase that the config no longer names stays where it is, since the benchmark does not know its repository any more. So does a checkout whose label the config now gives to another repository, since it is no worktree of that one. Its file in `<out>/work` is renamed, so that a session of the same name does not take its place, and goes once the checkout is gone. The next `plan` or `run` says on stderr where each such checkout is and that `git worktree remove --force` in that repository removes it. The benchmark only ever deletes a directory that git lists as a worktree of the codebase, and it never prunes your repository's worktree list. A file that a session wrote beside its checkout, in the directory that was made for the checkout alone, stays there with that directory.
-- One benchmark at a time works in an output directory. `plan` and `run` keep a lock file there, `<out>/lock`, and a second one is refused while the first is running. The lock of a benchmark that was killed is taken over by the next one, also when it names the next one's own process id, as in a container that gives the benchmark the same id each time. The lock tells its holders apart by their process ids, so it holds on one machine, and two containers that share an output directory can both get in. The lock is made as a hard link, so `plan` and `run` refuse an output directory on a file system without hard links. Use another `--out` there.
+- A benchmark that is killed outright, as with `kill -9`, ends nothing. Its sessions run on until they finish, and its worktrees stay behind among the temporary files. `<out>/work` remembers where each one is, and the next `plan`, `run`, `entries` or `probe` on that output directory removes each one of a codebase that the config still names, also the one of a session that has its record. A checkout of a codebase that the config no longer names stays where it is, since the benchmark does not know its repository any more. So does a checkout whose label the config now gives to another repository, since it is no worktree of that one. Its file in `<out>/work` is renamed, so that a session of the same name does not take its place, and goes once the checkout is gone. The next `plan`, `run`, `entries` or `probe` says on stderr where each such checkout is and that `git worktree remove --force` in that repository removes it. The benchmark only ever deletes a directory that git lists as a worktree of the codebase, and it never prunes your repository's worktree list. A file that a session wrote beside its checkout, in the directory that was made for the checkout alone, stays there with that directory.
+- One benchmark at a time works in an output directory. `plan`, `run`, `entries` and `probe` keep a lock file there, `<out>/lock`, and a second one is refused while the first is running. The lock of a benchmark that was killed is taken over by the next one, also when it names the next one's own process id, as in a container that gives the benchmark the same id each time. The lock tells its holders apart by their process ids, so it holds on one machine, and two containers that share an output directory can both get in. The lock is made as a hard link, so `plan`, `run`, `entries` and `probe` refuse an output directory on a file system without hard links. Use another `--out` there.
 - Claude Code can keep the output of a session's tools under `~/.claude/projects/`, in a directory named after the checkout's path, although the sessions are started with `--no-session-persistence`. After a run of 108 sessions with Claude Code 2.1.311 there were four such directories, and `ls ~/.claude/projects | grep checkout-` lists them. They hold names from the codebase and stay on your machine until you delete them. `~/.claude.json`, where Claude Code keeps an entry for each project directory, got no entry for a checkout in more than a hundred sessions with Claude Code 2.1.311.
 
 ## Reading the report
 
-A solved task means that the project compiles and that the change passed the comparison of [The tasks](#the-tasks), which reads tokens and no types. Some changes get past that comparison, and that section lists them. A session can also solve a task and still break a build that the benchmark never runs, as [What it does not tell you](#what-it-does-not-tell-you) lists. One target per task type and codebase is a small sample, so raise `--repeat` and add codebases before you read much into a difference between the arms.
+A solved task means that the project compiles and that the change passed the comparison of [The tasks](#the-tasks), which reads tokens and no types. Some changes get past that comparison, and that section lists them. A session can also solve a task and still break a build that the benchmark never runs, as [What it does not tell you](#what-it-does-not-tell-you) lists. One target per task type, codebase and level is a small sample, so raise `--repeat` and add codebases before you read much into a difference between the arms.
 
 A session ends in one of seven ways, and the page counts them per arm.
 
@@ -229,7 +334,103 @@ Cost is what Claude Code reports for the session. Time is wall-clock time, so ru
 
 The arms are compared on the same work. A round of a task enters the report once every arm that `run` started sessions for has one for it, and the page says how many sessions are waiting for their counterpart. A report of one arm alone says that it compares nothing. A session that had to be killed has a time and no cost. The cost medians leave it out, and the page says how many those are in each arm.
 
+Below the summary bars, the report page has a card per task type with a chart of median cost and one of median time against level, one line per arm, and a table per level and arm with solved, median cost, median time, median tool calls and the files of each codebase's target. The table of every session includes the columns `Level` and `Target files`. In `summary.json`, `taskTypes[].levels[]` holds each `level`, `targets` with each codebase's `files`, and the figures per arm, and each entry in `runs[]` holds `level` and `files`.
+
+## The probe
+
+A tool-only pass calls the language server's refactoring tools directly on many targets of each task type, with no agent, and judges each result with `unmetExpectations` and the codebase's check command. A session that repairs a tool's mistake by hand still solves its task, so an agent run shows a tool fault only as extra cost and time. `probe` finds those faults directly and costs nothing:
+
+```bash
+node benchmarks/bench.mjs probe --config benchmarks/out/config.json --out benchmarks/out
+```
+
+Optional flags:
+
+- `--min-files <n>` sets the fewest files a target must involve, default 5 as in `plan`.
+- `--per-type <n>` sets how many targets to probe per task type and codebase, default 30, or `all` for every target.
+- `--only <text>` keeps the task types whose `<label>/<type>` contains the text. A text that matches none is refused.
+
+`probe` draws from the targets that pass every filter of `plan`: size, check command coverage, Elm files outside the project, links, an occupied new path, Lamdera's four modules and six types in `Types`, and the trial builds for `add-variant`, `move-function`, `remove-variant` and `remove-field`. Where a target fails its trial, `probe` drops it and takes the next candidate. Where more targets remain than `--per-type`, `probe` takes that many at equal steps of size from `--min-files` to the largest target's size, stepping from the largest down and picking the nearest target not taken yet, the smaller and then the first by key on a tie. The largest target is always included, and the choice does not depend on the machine.
+
+For each task type, `probe` calls the handlers of `mcp-wrapper/tools.mjs` in its own process, with the project's own compiler and `elm-format` allowed as `--project-tools` allows them. That follows the path of the `lsp` arm without the MCP transport and argument schema check. `probe` points each tool at the declaration, counting columns in bytes of UTF-8 as the server counts them: a function at column 0 of its first line, which is its type annotation where it has one, and a type, variant or field at its name in the declaration.
+
+- `rename-function` and `rename-shared-function` call `elm_rename_function`.
+- `rename-variant` calls `elm_rename_variant`.
+- `rename-field` calls `elm_rename_field`.
+- `rename-module` calls `elm_rename_file`, with the new file beside the old one.
+- `rename-type` calls `elm_rename_type`.
+- `move-function` calls `elm_move_function`, passing the function's line and `target_module`.
+- `add-variant` calls `elm_prepare_add_variant` and then `elm_add_variant` without `branches`, so the server writes a `Debug.todo` branch for each case that needs one.
+- `remove-variant` calls `elm_prepare_remove_variant` and then `elm_remove_variant`.
+- `remove-field` calls `elm_prepare_remove_field` and then `elm_remove_field`.
+
+After every call that did not fail, `probe` runs the check command and judges the result against the state the checkout had before the call. Each target ends in one of five outcomes:
+
+| Outcome | Meaning |
+|---------|---------|
+| `solved` | The project compiles and every expectation holds |
+| `wrong-result` | The project compiles, but an expectation fails |
+| `does-not-compile` | The check command fails |
+| `tool-error` | A tool call failed, or failed after changing files |
+| `tool-refused` | A tool call failed without changing any file and said `"required by Lamdera"`, `"already exists"`, `"import cycle"`, `"not possible"` or `"No file was changed"` |
+
+How `probe` manages checkouts, servers and records:
+
+- `probe` takes `<out>/lock`, removes leftover checkouts first, works in a checkout of its own at `<out>/work/<label>.probe`, and writes nothing into the codebase's repository beyond that worktree, which it removes again.
+- `probe` refuses a language server whose binary is missing or older than its sources, runs `cli.mjs doctor` first, and checks before each target that the server's version and build match what it began with.
+- One language server stays up per codebase across targets, bringing its index in step with the disk before each call. After a `tool-error`, `probe` stops the server so the next call starts a fresh one. On 18 targets of A, starting a fresh server for every target gave the same outcomes, unmet expectation kinds and diff stats as keeping one server up, while the tool calls took 165 s against 36 s, about 7 s more per target.
+- After each target, `probe` restores every committed file and every Elm file from its text before the call or from the commit. Where that does not restore the checkout, `probe` removes the checkout and opens a fresh one.
+- The compiler's cache stays warm across targets. After a check that fails, `probe` builds the restored checkout. Where that fails too, `probe` deletes `elm-stuff` and builds again. When that passes, `probe` probes the target again with the fresh cache. When it fails, `probe` stops.
+- stderr prints a line when a codebase is checked out, one line per task type with the counts and time, and one line with the codebase's total time.
+- `<out>/probe/<label>.json` holds the codebase's label and commit, the language server's version, the benchmark's version, `--min-files`, `elmRoot`, `check`, `checkTimeoutMs`, `link`, and one record per target: `type`, `key`, `size`, `outcome`, `unmet`, `problems`, `text`, `diff` with file and line counts, `toolSeconds` and `checkSeconds`. Those records name files and symbols of the codebase.
+- `<out>/probe/<label>/<16 hex digits>.patch` holds the diff of each non-failing target and of any failing target that changed files, named by a digest of its type and key.
+- `<out>/probe.json` and the table printed to stdout hold counts only. They give, per codebase and task type, targets tried, counts of each outcome, counts of each unmet expectation kind, and the same outcome counts for each size band: `1-4`, `5-9`, `10-19`, `20-49`, `50-99`, `100-199` and `200+` files. They count every record in `<out>/probe/` for every codebase in the config, also one that `--only` skipped or a record from an earlier pass with a larger `--per-type`.
+- `probe` writes records every 5 seconds and when it ends, also on an error or an interrupt. Stopping it with Ctrl-C leaves no record for the target under way, and the same command resumes from the saved records.
+- `<out>/probe/<label>.json` is held to the language server, the benchmark's own code, `--min-files`, `elmRoot`, `check`, `checkTimeoutMs` and `link`. A run that differs in any of those is refused. `--per-type` and `--only` may change, and `probe` stays on the recorded commit even if `ref` moved.
+
+### What the probe found on three codebases
+
+I ran two tool-only passes on the three private codebases A, B and C with widened check commands, `--per-type 30` and `--min-files 5`. No agent session ran for either pass, and neither cost money.
+
+- **First pass.** Recorded in [`results/probe-before.json`](results/probe-before.json), on version 0.3.39 at commit `8678f91` across the six task types that existed then. It ran 392 targets in 16 minutes 50 seconds, with 224 solved, 165 that did not compile, 3 that compiled with a wrong change, and 0 failed or refused.
+- **Tip pass.** Recorded in [`results/probe.json`](results/probe.json), on all ten task types across 683 targets, 201 in A, 255 in B and 227 in C. It solved 682 and refused 1, taking 5 minutes 46 seconds on A, 10 minutes 16 seconds on B and 9 minutes 30 seconds on C.
+
+Solved of tried across all three codebases:
+
+| Task type | First pass | Tip |
+|-----------|------------|-----|
+| rename-function | 70 of 76 | 76 of 76 |
+| rename-shared-function | 18 of 34 | 34 of 34 |
+| rename-variant | 49 of 90 | 90 of 90 |
+| rename-field | 12 of 78 | 77 of 78 |
+| rename-module | 69 of 90 | 90 of 90 |
+| add-variant | 6 of 24 | 24 of 24 |
+| rename-type | | 90 of 90 |
+| move-function | | 52 of 52 |
+| remove-variant | | 90 of 90 |
+| remove-field | | 59 of 59 |
+| All | 224 of 392 | 682 of 683 |
+
+The four task types without a first-pass figure did not exist at `8678f91`. Each was first probed at a different point while the server was being fixed, so those first numbers do not belong in one column with the others. For the record, their first passes solved 39 of 90 for `rename-type`, 1 of 52 for `move-function`, 63 of 90 for `remove-variant` and 13 of 59 for `remove-field`.
+
+The one target on the tip that did not solve is a field rename that `elm_rename_field` refused, and the refusal is right. A list of records of the alias is passed where a list of another record type with the same fields is expected, so renaming the field on one of the two alone cannot compile. [What it does not tell you](#what-it-does-not-tell-you) already notes that case for a session.
+
+The first pass led to reproductions of 14 distinct faults in the six tools, each reduced to short modules with invented names. The passes on the four newer task types and reading the diffs that still failed led to more. Every one has a regression test now:
+
+- **`elm_rename_field`.** Reached a field only where the record's type was written down. Skipped uses in other modules when another module declared an alias of the same name, in about half of the server's starts. Renamed a field of another record in a record update inside a `case` branch. Renamed a record pattern on a record type without an alias.
+- **`elm_rename_function`.** Renamed qualified calls to another module's function of the same name, `List.isEmpty` for one. Renamed the uses of a parameter called like the function.
+- **`elm_rename_variant`.** Renamed other types' variants of the same name. Renamed another module's type of the variant's name.
+- **`elm_rename_type`.** Renamed the type's own variant of the same name.
+- **`elm_rename_file`.** Rewrote the module's name inside string literals. Rewrote names qualified with another import's alias that equals the module's name. Left `exposed-modules` of a package's `elm.json` as it was.
+- **`elm_add_variant`.** Put the variant under a comment behind the equals sign, where the file does not parse. Put it above a comment between variants. Wrote the new branch without the qualifier of the other branches. Added a branch to a `case` on another type that shares a variant's name.
+- **`elm_move_function`.** Imported the function into the old module where that module never calls it, which closed an import cycle. Left the function without the imports and names it uses. Left calls written with a qualifier as they were.
+- **`elm_remove_variant`.** Took out another type's branch. Removed only the first line of a variant whose arguments run onto the lines below. Cut a removed branch inside a removed branch as two overlapping edits. Removed the catch-all of a `case` on another type.
+- **`elm_remove_field`.** Left a read through another field, `model.settings.theme`. Left a comma behind when it removed the first field of a record written over several lines. Mangled an update that reads the field it sets.
+- **All rename tools.** Left the modules under `tests/` untouched.
+
 ## A run on three codebases
+
+This run was made before levels and the four newer task types existed, so it covers six task types with one target per codebase each. No agent run with levels has been made since.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="results/report-dark.png">
@@ -261,7 +462,7 @@ Each cell below holds the tasks solved, the median cost, the median time and the
 
 Over all kinds, each arm solved 54 of 54. The median session cost $0.10, took 27 s and made 5 tool calls without the server. With it, the median session cost $0.09, took 25 s and made 4 tool calls. The other overall figures lean the other way. Without the server and with it, the sessions cost $6.15 and $6.34 in total and $0.114 and $0.117 on average, took 29.3 s and 29.8 s on average, and made 5.8 and 6.0 tool calls on average. A round pairs the two sessions of the same codebase, kind of task and repetition. The session with the server was the cheaper one in 26 of the 54 rounds and the faster one in 30. It made fewer tool calls in 22 and the same number in 14. Over all kinds of task, neither arm was cheaper or faster in this run. Every session of the `lsp` arm but one called a tool of the server, 53 of 54.
 
-[`results/summary.json`](results/summary.json) is the run's summary. `report` wrote it and the report page at the tip of this branch, from the records of the run and a plan made there, which is why they hold the sizes above. The two pictures show the upper part of that page. The summary holds the figures of the report page for every one of the 108 sessions, so the two tables, the total costs and the count of sessions that called the server can be checked against it. Like the pictures, it holds counts and measurements only.
+[`results/summary.json`](results/summary.json) is the run's summary. `report` wrote it and the report page before levels were added, from the records of the run and a plan made at that point, which is why they hold the sizes above. `report` at the tip of this branch adds the level fields, and the figures in `results/summary.json` still hold. The two pictures show the upper part of that page. The summary holds the figures of the report page for every one of the 108 sessions, so the two tables, the total costs and the count of sessions that called the server can be checked against it. Like the pictures, it holds counts and measurements only.
 
 Both arms solved every task. With this model at this effort, the solve rate does not tell the arms apart. The difference lies in single kinds of task and single codebases.
 
@@ -305,16 +506,16 @@ The counts in the next three paragraphs come from the transcripts of the session
 
 The 9 sessions that added a variant with the server called `elm_prepare_add_variant` and `elm_add_variant` once each and made 3 edits by hand between them. The 9 sessions without the server made 39 edits.
 
-Each of the 9 sessions that renamed a field with the server called `elm_rename_field` once. In the 3 sessions on A, the project built right after that call, and the session changed nothing more. In the 6 sessions on B and C, the session corrected the result by hand, with 19 edits by the Edit tool between them and `sed` commands besides. By what those sessions wrote, the tool had renamed a field of the same name on another record and had left uses of the field out. The 9 sessions without the server made the change with shell commands and no edit.
+Each of the 9 sessions that renamed a field with the server called `elm_rename_field` once. In the 3 sessions on A, the project built right after that call, and the session changed nothing more. In the 6 sessions on B and C, the session corrected the result by hand, with 19 edits by the Edit tool between them and `sed` commands besides. By what those sessions wrote, the tool had renamed a field of the same name on another record and had left uses of the field out. Those were faults in version 0.3.39 at `8678f91`, and both have been reproduced and fixed since, as [The probe](#the-probe) reports. The 9 sessions without the server made the change with shell commands and no edit.
 
-Each of the 9 sessions that renamed a variant with the server called `elm_rename_variant` once. On A, all 3 sessions then changed the result of the tool by hand, with 5 edits in one session and `sed` commands in the other two. By what those sessions wrote, the tool had also renamed the variants of the same name on two other types. On B and C, the 6 sessions built the project after the call and changed nothing more.
+Each of the 9 sessions that renamed a variant with the server called `elm_rename_variant` once. On A, all 3 sessions then changed the result of the tool by hand, with 5 edits in one session and `sed` commands in the other two. By what those sessions wrote, the tool had also renamed the variants of the same name on two other types. That fault in version 0.3.39 at `8678f91` has also been reproduced and fixed since, as [The probe](#the-probe) reports. On B and C, the 6 sessions built the project after the call and changed nothing more.
 
 This is a small run. It has one target per kind of task and codebase, nine sessions per kind of task and arm, and one model at one effort. A cell of the table by codebase rests on three sessions on one target. Its times come from two sessions side by side on one machine. [What it does not tell you](#what-it-does-not-tell-you) lists what the benchmark cannot measure at all.
 
 ## What it does not tell you
 
 - The tasks are refactorings the server has a dedicated tool for. Work that mostly needs reading and understanding code is not covered.
-- One target per task type and codebase is a small sample. Raise `--repeat` to see how much sessions vary, and add codebases to see how much targets vary.
+- One target per task type, codebase and level is a small sample. Raise `--repeat` to see how much sessions vary, and add codebases to see how much targets vary.
 - It measures one harness, Claude Code, with one model at a time.
 - `lsp` means the MCP tools and the instructions that the server sends when a session connects, which Claude Code shows to the model. They are notes on paths, lines and columns, and they give no advice to prefer the tools. The skill in `skills/elm-refactoring` is not loaded.
 - The sessions of both arms are started with six of Claude Code's tools named, the ones it reads, searches and edits files with: Bash, Read, Edit, Write, Grep and Glob. Neither arm has the rest of Claude Code's tools, subagents and web access among them.
@@ -324,11 +525,13 @@ This is a small run. It has one target per kind of task and codebase, nine sessi
 - A project whose check command generates Elm sources cannot be benchmarked. A session that ran the command would be judged by what the generator wrote, and one that did not would not, so `plan` stops on such a project.
 - Most environment variables of the shell that starts the benchmark reach the sessions. The ones that set the effort, the thinking and the length of an answer do not, as [What a run looks like](#what-a-run-looks-like) says. Some of Claude Code's act on MCP tools alone, and so on the `lsp` arm alone. Among those that Claude Code 2.1.311 reads are `MCP_TIMEOUT`, the time a server has to start, `MCP_TOOL_TIMEOUT`, the time a tool call may take, `MAX_MCP_OUTPUT_TOKENS`, the most of a tool's output that a session is shown, and `ENABLE_TOOL_SEARCH`. Its binary names more of the kind, such as `MCP_CONNECT_TIMEOUT_MS`, `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`, `MCP_CONNECTION_NONBLOCKING` and `MCP_SERVER_CONNECTION_BATCH_SIZE`. Leave such variables unset, or set them as you mean the `lsp` arm to run. Claude Code also reads variables for its Bash tool, `BASH_MAX_OUTPUT_LENGTH` and `BASH_DEFAULT_TIMEOUT_MS` among them. Both arms have Bash, so such a variable favours neither arm by itself, but a session that works by shell commands meets it more often. The variables that a Claude Code session sets for the commands it runs, such as `CLAUDECODE` and `CLAUDE_CODE_SESSION_ID`, reach no session and not the pre-flight of the MCP server, so a benchmark that an agent started runs its sessions as one started from a plain shell does. The ones that say how Claude Code signs in or which provider it uses stay, such as `ANTHROPIC_API_KEY`, `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_USE_BEDROCK`.
 - A `CLAUDE.md` or an `AGENTS.md` that a codebase has committed is not loaded into a session, and it still lies in the checkout, where a session of either arm can open it like any file. One that recommends the language server, or names its command line, then reaches both arms.
-- A rename of a field of a record alias that a port carries, or that the program's flags are decoded into, changes the key that JavaScript sees. The compiler and the verdict take it for solved, in both arms alike, and the JavaScript side breaks when the program runs.
+- A rename or removal of a field on a record alias that a port carries, or that the program's flags are decoded into, changes the key that JavaScript sees. The compiler and the verdict take it for solved, in both arms alike, and the JavaScript side breaks when the program runs.
 - A field rename can be impossible to solve as judged: where a value of the record is also passed for another record type with the same fields, renaming the field on one of the two needs more than a rename. Both arms then fail that task.
 - With `--concurrency` above 1, the sessions that run side by side are worktrees of one repository. `git worktree list` in one of them shows where the others are, the other arm's checkout of the same task among them.
 - A session that runs `ps` can see the benchmark's command line and its `--out`. With `--concurrency` above 1, it can also see another session's `--mcp-config`. From the output directory, it can read the plan and the patch of an earlier session.
-- In a package, the documentation of a module names what it documents in `@docs` lines. A renamed function or variant can keep its old name there and pass. Comments are no part of what the verdict compares, and only `elm make --docs` reads those lines, which a check command that builds single files does not run.
+- In a package, the documentation of a module names what it documents in `@docs` lines. A renamed function, type or variant, or a removed variant, can keep its old name there and pass. Comments are no part of what the verdict compares, and only `elm make --docs` reads those lines, which a check command that builds single files does not run.
+- In `move-function`, comments and the doc comment can stay behind or move, and a name written bare where the destination's import lists it by name passes though the request asks for the qualifier. A name that was qualified in the source module and is written bare through a `(..)` import of the destination fails though it compiles.
+- In `remove-field`, a string with the field's name, such as a JSON key in a decoder or encoder, is no read and stays, so a session that takes it out fails.
 - A module that other tooling finds by its name or its path is renamed like any other: a route of elm-pages or elm-land, or the entry of a build script that `check` does not run. Only the four modules that Lamdera looks for keep their names. A session can do such a rename right and still break a build that the benchmark never runs.
 - A file outside the Elm sources can name the renamed module or its path: a page of documentation, the configuration of a linter. It is not the task's to change. A session that corrects the name there is judged wrong, and one that leaves it stale passes. A session that looks for uses by searching text meets such a mention more often than one that calls the language server.
-- Test modules are mostly out of the picture. The language server does not index `tests/`, and a target that test modules use is left out unless `check` compiles the tests. How either arm copes with a rename that reaches into tests is not measured.
+- A target that test modules use is left out unless `check` compiles the tests. The language server now indexes `tests/`, so when `check` compiles the tests those targets are in play. When `check` does not compile the tests, how either arm handles edits that reach into `tests/` is not measured.

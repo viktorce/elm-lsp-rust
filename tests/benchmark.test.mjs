@@ -50,6 +50,8 @@ import {
 } from "../benchmarks/lib/sandbox.mjs";
 import { runGroup } from "../benchmarks/lib/process.mjs";
 import { unmetExpectations } from "../benchmarks/lib/tasks.mjs";
+import { probeCodebase } from "../benchmarks/lib/probe.mjs";
+import { ToolError } from "../mcp-wrapper/errors.mjs";
 import { copyFixture, installLanguageServerStandIn, REPO, runNode, tempDir, wrapperCopy } from "./support.mjs";
 import { BENCH, left, SPREAD } from "./benchmark-support.mjs";
 
@@ -1018,7 +1020,7 @@ test("a leftover checkout of a codebase that the config no longer names, or name
   // And two slots of codebases that the config still has: a checkout of its repository, and one that is gone
   const own = join(tempDir(t), "checkout-own", "fixture");
   await createWorktree(codebase, own);
-  writeFileSync(join(workDir, "Fixture--rename-function--baseline--1"), JSON.stringify({ dir: own, label: "Fixture" }));
+  writeFileSync(join(workDir, "Fixture--rename-function--100--baseline--1"), JSON.stringify({ dir: own, label: "Fixture" }));
   writeFileSync(join(workDir, "Moved--rename-function--lsp--1"), JSON.stringify({ dir: join(tempDir(t), "checkout-gone", "fixture"), label: "Moved" }));
 
   const printed = t.mock.method(console, "error", () => {});
@@ -1591,7 +1593,7 @@ test("plan, run and report work end to end on a throwaway repository", async (t)
 
   // A check command that names no module leaves open what its verdict covers
   configWith([process.execPath, FAKE_COMPILER]);
-  const blind = await bench(["plan", "--config", config, "--min-files", "1"]);
+  const blind = await bench(["plan", "--config", config, "--min-files", "1", "--levels", "100"]);
   assert.equal(blind.code, 1);
   assert.match(
     blind.stderr,
@@ -1600,17 +1602,28 @@ test("plan, run and report work end to end on a throwaway repository", async (t)
 
   // The fixture has three modules that nothing imports, so the build names all three
   configWith([process.execPath, FAKE_COMPILER, "src/Main.elm", "./src/FieldRename.elm", "src/TestRemoveVariant.elm"]);
-  const planned = await bench(["plan", "--config", config, "--min-files", "1"]);
+  const planned = await bench(["plan", "--config", config, "--min-files", "1", "--levels", "100"]);
   assert.equal(planned.code, 0, planned.stderr);
-  assert.match(planned.stdout, /Fixture: 4 tasks in 5 modules, of which the check command compiles 5/);
+  assert.match(planned.stdout, /Fixture: 8 tasks in 5 modules, of which the check command compiles 5/);
   // Nothing imports the module with the custom types, and no function name is shared by four modules
   assert.match(planned.stdout, /Fixture: no suitable target for rename-shared-function\. Nothing in the project is a candidate for it/);
   assert.match(planned.stdout, /Fixture: no suitable target for rename-variant\. No candidate involves more than 0 files, and --min-files asks for 1/);
   const plan = JSON.parse(readFileSync(join(out, "plan.json"), "utf-8"));
   assert.deepEqual(
     plan.tasks.map((task) => task.id),
-    ["Fixture/rename-function", "Fixture/rename-field", "Fixture/rename-module", "Fixture/add-variant"]
+    [
+      "Fixture/rename-function/100",
+      "Fixture/rename-field/100",
+      "Fixture/rename-module/100",
+      "Fixture/add-variant/100",
+      "Fixture/rename-type/100",
+      "Fixture/move-function/100",
+      "Fixture/remove-variant/100",
+      "Fixture/remove-field/100",
+    ]
   );
+  // The plan says what it asked for
+  assert.deepEqual([plan.minFiles, plan.levels], [1, [100]]);
   // The limit that the config leaves out is written down as the one that held
   assert.equal(plan.codebases[0].checkTimeoutMs, 600000);
   // The codebase has as many lines as wc counts in its modules, each of which ends with a line break
@@ -1619,7 +1632,7 @@ test("plan, run and report work end to end on a throwaway repository", async (t)
 
   // The same commit always yields the same plan, so two runs are comparable
   const again = join(tempDir(t), "out");
-  await runNode(BENCH, ["plan", "--config", config, "--min-files", "1", "--out", again]);
+  await runNode(BENCH, ["plan", "--config", config, "--min-files", "1", "--levels", "100", "--out", again]);
   assert.equal(readFileSync(join(again, "plan.json"), "utf-8"), readFileSync(join(out, "plan.json"), "utf-8"));
 
   // The repository moves on after the plan was made. The sessions still start from the planned commit.
@@ -1633,8 +1646,8 @@ test("plan, run and report work end to end on a throwaway repository", async (t)
   const solved = await run("rename-function", "solve");
   assert.equal(solved.code, 0, solved.stderr);
   assert.match(solved.stdout, /2 sessions to run with claude-opus-5-5\nEach is stopped once it has spent \$5, which makes about \$10 if every one gets that far\./);
-  assert.match(solved.stdout, /Fixture\/rename-function  baseline  #1  passed  \d+s  \$0\.25/);
-  assert.match(solved.stdout, /Fixture\/rename-function  lsp  #1  passed/);
+  assert.match(solved.stdout, /Fixture\/rename-function\/100  baseline  #1  passed  \d+s  \$0\.25/);
+  assert.match(solved.stdout, /Fixture\/rename-function\/100  lsp  #1  passed/);
 
   // Claude Code tells the model where it works. Neither arm can read from that which one it is, and
   // the plan and the other arm's patch are nowhere near: each checkout is alone in a directory of its own.
@@ -1649,9 +1662,9 @@ test("plan, run and report work end to end on a throwaway repository", async (t)
     assert.ok(!/baseline|lsp|rename|Fixture/.test(chosen.replace(basename(repo), "")), chosen);
     assert.equal(existsSync(dirname(cwd)), false, "the checkout is gone when its session is judged");
   }
-  assert.match((await run("rename-module", "idle")).stdout, /Fixture\/rename-module  lsp  #1  wrong-result/);
-  assert.match((await run("add-variant", "break")).stdout, /Fixture\/add-variant  baseline  #1  does-not-compile/);
-  assert.match((await run("rename-field", "crash")).stdout, /Fixture\/rename-field  lsp  #1  agent-failed/);
+  assert.match((await run("rename-module", "idle")).stdout, /Fixture\/rename-module\/100  lsp  #1  wrong-result/);
+  assert.match((await run("add-variant", "break")).stdout, /Fixture\/add-variant\/100  baseline  #1  does-not-compile/);
+  assert.match((await run("rename-field", "crash")).stdout, /Fixture\/rename-field\/100  lsp  #1  agent-failed/);
 
   const records = Object.fromEntries(
     readdirSync(join(out, "runs"))
@@ -1659,23 +1672,23 @@ test("plan, run and report work end to end on a throwaway repository", async (t)
       .map((file) => [file.replace(".json", ""), JSON.parse(readFileSync(join(out, "runs", file), "utf-8"))])
   );
   assert.equal(Object.keys(records).length, 8);
-  const lspRename = records["Fixture--rename-function--lsp--1"];
+  const lspRename = records["Fixture--rename-function--100--lsp--1"];
   assert.deepEqual(
     { outcome: lspRename.outcome, problems: lspRename.problems, changedFiles: lspRename.changedFiles, lspCalls: lspRename.lspCalls, costUsd: lspRename.costUsd },
     { outcome: "passed", problems: [], changedFiles: 2, lspCalls: 1, costUsd: 0.25 }
   );
-  assert.equal(records["Fixture--rename-function--baseline--1"].lspCalls, 0);
+  assert.equal(records["Fixture--rename-function--100--baseline--1"].lspCalls, 0);
   assert.equal(lspRename.commit, plan.codebases[0].commit);
   assert.notEqual(lspRename.commit, git(repo, "rev-parse", "HEAD").trim());
-  assert.deepEqual(records["Fixture--rename-module--baseline--1"].problems, [
+  assert.deepEqual(records["Fixture--rename-module--100--baseline--1"].problems, [
     "src/Types.elm still exists",
     "src/TypesRenamed.elm does not declare the module TypesRenamed",
     "Types is still imported by src/Main.elm, src/Utils.elm",
   ]);
-  assert.match(records["Fixture--add-variant--lsp--1"].problems[0], /^the check command fails: SYNTAX PROBLEM/);
-  assert.ok(existsSync(join(out, "runs", "Fixture--rename-function--lsp--1.jsonl")), "the transcript is kept");
+  assert.match(records["Fixture--add-variant--100--lsp--1"].problems[0], /^the check command fails: SYNTAX PROBLEM/);
+  assert.ok(existsSync(join(out, "runs", "Fixture--rename-function--100--lsp--1.jsonl")), "the transcript is kept");
   // Both arms were started with the same built-in tools, and one of them with the language server's besides
-  const toolsOf = (arm) => JSON.parse(readFileSync(join(out, "runs", `Fixture--rename-function--${arm}--1.jsonl`), "utf-8").split("\n")[0]).tools;
+  const toolsOf = (arm) => JSON.parse(readFileSync(join(out, "runs", `Fixture--rename-function--100--${arm}--1.jsonl`), "utf-8").split("\n")[0]).tools;
   assert.deepEqual(toolsOf("baseline"), ["Bash", "Read", "Edit", "Write", "Grep", "Glob"]);
   // The README names them as what the sessions are started with. Claude Code leaves Grep and Glob out of a session that names no tools.
   const readme = readFileSync(join(REPO, "benchmarks/README.md"), "utf-8");
@@ -1683,13 +1696,13 @@ test("plan, run and report work end to end on a throwaway repository", async (t)
   assert.deepEqual(named?.split(/, | and /), toolsOf("baseline"));
   assert.deepEqual(toolsOf("lsp"), [...toolsOf("baseline"), "mcp__elm-lsp__elm_symbols"]);
   assert.match(
-    readFileSync(join(out, "runs", "Fixture--rename-function--lsp--1.patch"), "utf-8"),
+    readFileSync(join(out, "runs", "Fixture--rename-function--100--lsp--1.patch"), "utf-8"),
     /^\+defaultUserRenamed : User$/m,
     "the agent's changes are kept as a patch"
   );
 
   // A new plan would give the records other targets under the same names
-  const replanned = await bench(["plan", "--config", config, "--min-files", "1"]);
+  const replanned = await bench(["plan", "--config", config, "--min-files", "1", "--levels", "100"]);
   assert.equal(replanned.code, 1);
   assert.match(replanned.stderr, /runs holds the records of an earlier plan\. Use another --out, or delete that directory\./);
 
@@ -1757,7 +1770,7 @@ test("plan, run and report work end to end on a throwaway repository", async (t)
   assert.equal(unreachable.code, 1);
   assert.match(
     unreachable.stderr,
-    /^Fixture--rename-function--\w+--3: the session ended before the model answered once \(API Error: Request rejected \(429\) · the stand-in is rate limited\)\. Nothing was recorded for it\./
+    /^Fixture--rename-function--100--\w+--3: the session ended before the model answered once \(API Error: Request rejected \(429\) · the stand-in is rate limited\)\. Nothing was recorded for it\./
   );
   assert.deepEqual(thirdRound(), []);
   // The same in the middle of the work. Recorded, the session would count against the arm that
@@ -1766,7 +1779,7 @@ test("plan, run and report work end to end on a throwaway repository", async (t)
   assert.equal(cutOff.code, 1);
   assert.match(
     cutOff.stderr,
-    /^Fixture--rename-function--\w+--3: the session lost the API in the middle of its work \(API Error: Request rejected \(429\) · the stand-in is rate limited\)\. Nothing was recorded for it\./
+    /^Fixture--rename-function--100--\w+--3: the session lost the API in the middle of its work \(API Error: Request rejected \(429\) · the stand-in is rate limited\)\. Nothing was recorded for it\./
   );
   assert.deepEqual(thirdRound(), []);
 
@@ -1798,6 +1811,205 @@ test("plan, run and report work end to end on a throwaway repository", async (t)
   assert.match(readFileSync(join(out, "report.html"), "utf-8"), /10 sessions in total/);
 });
 
+test("a plan picks a target per level, and a run can keep to some of the levels", async (t) => {
+  const repo = gitRepository(copyFixture(t));
+  const out = join(tempDir(t), "out");
+  const config = join(tempDir(t), "config.json");
+  const check = [process.execPath, FAKE_COMPILER, "src/Main.elm", "./src/FieldRename.elm", "src/TestRemoveVariant.elm"];
+  writeFileSync(config, JSON.stringify({ codebases: [{ label: "Fixture", repo, check }] }));
+  const bench = (args, FAKE_AGENT_MODE) => runNode(BENCH, [...args, "--out", out], { env: { ...process.env, FAKE_AGENT: FAKE_AGENT_MODE } });
+
+  // A level is a whole number of files
+  const unreadable = await bench(["plan", "--config", config, "--levels", "10,ten"]);
+  assert.equal(unreadable.code, 2);
+  assert.match(unreadable.stderr, /^--levels must be whole numbers of 1 or more, separated by commas, as in 10,50,100\n/);
+
+  // The fixture's targets involve one file or two, so each task type gets the levels that two sizes give at most
+  const planned = await bench(["plan", "--config", config, "--min-files", "1"]);
+  assert.equal(planned.code, 0, planned.stderr);
+  assert.match(planned.stdout, /^Fixture: 9 tasks in 5 modules, of which the check command compiles 5$/m);
+  assert.match(
+    planned.stdout,
+    /^Fixture: rename-module has targets for the levels 10 and 100, of 1 and 2 files, and none for the level 50\. Its largest target involves 2 files\.$/m
+  );
+  assert.match(
+    planned.stdout,
+    /^Fixture: rename-function has a target for the level 100, of 1 file, and none for the levels 10 and 50\. Its largest target involves 1 file\.$/m
+  );
+  const plan = JSON.parse(readFileSync(join(out, "plan.json"), "utf-8"));
+  assert.deepEqual(plan.levels, [10, 50, 100]);
+  assert.deepEqual(
+    plan.tasks.map(({ id, level, files }) => [id, level, files]),
+    [
+      ["Fixture/rename-function/100", 100, 1],
+      ["Fixture/rename-field/100", 100, 2],
+      ["Fixture/rename-module/10", 10, 1],
+      ["Fixture/rename-module/100", 100, 2],
+      ["Fixture/add-variant/100", 100, 1],
+      ["Fixture/rename-type/100", 100, 2],
+      ["Fixture/move-function/100", 100, 1],
+      ["Fixture/remove-variant/100", 100, 1],
+      ["Fixture/remove-field/100", 100, 1],
+    ]
+  );
+  // The two targets of one task type are two modules
+  const [small, large] = plan.tasks.filter((task) => task.type === "rename-module").map((task) => task.prompt.split("`")[1]);
+  assert.notEqual(small, large);
+
+  // Levels named in any order, and one named twice, are the same levels
+  const reordered = join(tempDir(t), "out");
+  assert.equal((await runNode(BENCH, ["plan", "--config", config, "--min-files", "1", "--levels", "100,10,10", "--out", reordered])).code, 0);
+  assert.deepEqual(JSON.parse(readFileSync(join(reordered, "plan.json"), "utf-8")).levels, [10, 100]);
+
+  const run = (mode, ...more) => bench(["run", "--config", config, "--agent", FAKE_AGENT, "--timeout-min", "1", ...more], mode);
+  // A level that the plan did not ask for is a mistake, and so is one that no task of the plan has
+  const unplanned = await run("idle", "--levels", "20");
+  assert.equal(unplanned.code, 1);
+  assert.match(unplanned.stderr, /^The plan has no level 20\. Its levels are 10, 50, 100\.\n$/);
+  const empty = await run("idle", "--levels", "50", "--only", "rename-module");
+  assert.equal(empty.code, 1);
+  assert.match(empty.stderr, /^No task of the plan has "rename-module" in its id and the level 50\. The plan's tasks are: Fixture\/rename-function\/100, /);
+
+  // The small level alone, to try a run small
+  const smallRun = await run("idle", "--levels", "10");
+  assert.equal(smallRun.code, 0, smallRun.stderr);
+  assert.match(smallRun.stdout, /^2 sessions to run/);
+  assert.match(smallRun.stdout, /^Fixture\/rename-module\/10  baseline  #1  wrong-result/m);
+  const record = JSON.parse(readFileSync(join(out, "runs", "Fixture--rename-module--10--baseline--1.json"), "utf-8"));
+  assert.deepEqual([record.task, record.level, record.files], ["Fixture/rename-module/10", 10, 1]);
+  // --only still picks by id, here every level of a task type
+  assert.match((await run("idle", "--only", "rename-module")).stdout, /^2 sessions to run[^]*Fixture\/rename-module\/100  /);
+
+  assert.equal((await bench(["report"])).code, 0);
+  const summary = JSON.parse(readFileSync(join(out, "summary.json"), "utf-8"));
+  const [moduleRename] = summary.taskTypes;
+  assert.deepEqual(
+    moduleRename.levels.map(({ level, targets, baseline, lsp }) => [level, targets, baseline.sessions, lsp.sessions]),
+    [
+      [10, [{ codebase: "Fixture", files: 1 }], 1, 1],
+      [100, [{ codebase: "Fixture", files: 2 }], 1, 1],
+    ]
+  );
+  assert.deepEqual(summary.runs.map(({ level, files }) => [level, files]).sort(), [[10, 1], [10, 1], [100, 2], [100, 2]]);
+  const page = readFileSync(join(out, "report.html"), "utf-8");
+  assert.match(page, /aria-label="Median cost per level of Rename a module, one line per arm\./);
+  assert.match(page, /<td rowspan="2">100<\/td><td rowspan="2">Fixture 2<\/td>/);
+  // Nothing of the codebase's targets is named, not even the files of the modules to rename
+  for (const name of [small, large]) {
+    assert.ok(!(JSON.stringify(summary) + page).includes(`${name}.elm`), `${name} stays out of the summary and the page`);
+  }
+});
+
+// A stand-in for the compiler that builds the files it is named and no others. It fails on a module
+// that holds BROKEN, and where two of the modules it is named hold CLASH. It notes the files of each
+// build in `log`, and takes COMPILE_DELAY_MS to start, like a build that has work to do.
+function namedFilesCompiler(t, log) {
+  const compiler = join(tempDir(t), "compile.mjs");
+  writeFileSync(
+    compiler,
+    `import { appendFileSync, readFileSync } from "fs";
+const files = process.argv.slice(2).filter((word) => word.endsWith(".elm"));
+appendFileSync(${JSON.stringify(log)}, JSON.stringify(files) + "\\n");
+await new Promise((resolve) => setTimeout(resolve, Number(process.env.COMPILE_DELAY_MS ?? 0)));
+const texts = files.map((file) => readFileSync(file, "utf-8"));
+if (texts.some((text) => text.includes("BROKEN"))) {
+  console.error("SYNTAX PROBLEM: a module is broken");
+  process.exit(1);
+}
+if (texts.filter((text) => text.includes("CLASH")).length > 1) {
+  console.error("MODULE NAME CLASH: two modules clash");
+  process.exit(1);
+}
+`
+  );
+  return compiler;
+}
+
+test("entries names the modules that nothing imports and that compile, beside the check command's entry file", async (t) => {
+  const repo = copyFixture(t);
+  // One that does not compile, one that only a test imports, and the test itself
+  writeFileSync(join(repo, "src/Broken.elm"), "module Broken exposing (x)\n\n\nx =\n    BROKEN\n");
+  writeFileSync(join(repo, "src/OnlyTested.elm"), "module OnlyTested exposing (y)\n\n\ny =\n    1\n");
+  mkdirSync(join(repo, "tests"));
+  writeFileSync(join(repo, "tests/SomeTest.elm"), "module SomeTest exposing (z)\n\nimport OnlyTested\n\n\nz =\n    OnlyTested.y\n");
+  gitRepository(repo);
+  const log = join(tempDir(t), "builds.jsonl");
+  const compiler = namedFilesCompiler(t, log);
+  const out = join(tempDir(t), "out");
+  const config = join(tempDir(t), "config.json");
+  const check = [process.execPath, compiler, "make", "src/Main.elm", "--output=/dev/null"];
+  writeFileSync(
+    config,
+    JSON.stringify({
+      codebases: [
+        // A command that names no module has no word to put the modules beside, and the next codebase still gets its turn
+        { label: "Script", repo, check: ["sh", "-c", "exit 0"] },
+        { label: "Fixture", repo, check },
+      ],
+    })
+  );
+  const builds = () => readFileSync(log, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
+
+  const widened = await runNode(BENCH, ["entries", "--config", config, "--out", out]);
+  assert.equal(widened.code, 0, widened.stderr);
+  const lines = widened.stdout.trim().split("\n");
+  assert.equal(
+    lines[0],
+    `Script: "sh -c 'exit 0'" names no module of the project as a word of its own, so its modules cannot be put beside it. ` +
+      `Widen it by hand, or name each file it compiles as a word of the command, as in "elm make src/Main.elm", and run this again.`
+  );
+  assert.equal(lines[1], "Fixture: the check command compiles 3 of the 8 modules. Building the 4 modules that nothing imports one at a time.");
+  assert.equal(
+    lines[2],
+    "Fixture: 1 of them does not compile on its own. With the other 3 modules named, the check command compiles 6 modules instead of 3. " +
+      '1 module of tests that nothing imports is left out, since elm make does not build it. A check command can build those with a test runner, as in "elm-test", beside elm make.'
+  );
+  const kept = ["src/FieldRename.elm", "src/OnlyTested.elm", "src/TestRemoveVariant.elm"];
+  const pasted = [process.execPath, compiler, "make", "src/Main.elm", ...kept, "--output=/dev/null"];
+  assert.equal(lines[3], `Fixture: the widened check command passes. Put it in the config in place of the one there: "check": ${JSON.stringify(pasted)}`);
+  assert.equal(lines.length, 4);
+  // The command as it is, each module in place of the entry file, and the widened command
+  assert.deepEqual(builds(), [["src/Main.elm"], ["src/Broken.elm"], ["src/FieldRename.elm"], ["src/OnlyTested.elm"], ["src/TestRemoveVariant.elm"], ["src/Main.elm", ...kept]]);
+  // Nothing is left behind, in the repository or in the output directory
+  assert.equal(git(repo, "status", "--porcelain"), "");
+  assert.equal(worktreesOf(repo), 1);
+  assert.deepEqual(readdirSync(out), ["work"]);
+  assert.deepEqual(readdirSync(join(out, "work")), []);
+  // The config that it prints plans
+  writeFileSync(config, JSON.stringify({ codebases: [{ label: "Fixture", repo, check: pasted }] }));
+  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", join(tempDir(t), "out"), "--min-files", "1"]);
+  assert.match(planned.stdout, /^Fixture: \d+ tasks in 8 modules, of which the check command compiles 6$/m);
+
+  // Modules that each compile alone and not together make a command that fails, which it says
+  rmSync(join(repo, ".git"), { recursive: true });
+  for (const name of ["ClashA", "ClashB"]) writeFileSync(join(repo, `src/${name}.elm`), `module ${name} exposing (x)\n\n\nx =\n    "CLASH"\n`);
+  gitRepository(repo);
+  writeFileSync(config, JSON.stringify({ codebases: [{ label: "Fixture", repo, check }] }));
+  const clashing = await runNode(BENCH, ["entries", "--config", config, "--out", out]);
+  assert.equal(clashing.code, 0, clashing.stderr);
+  assert.match(clashing.stdout, /^Fixture: each of those modules compiles on its own, and named together the check command fails: MODULE NAME CLASH: two modules clash$/m);
+  assert.match(clashing.stdout, /^Fixture: so the widened check command is not fit for the config\. Name fewer of the modules\. It was "check": \[/m);
+  assert.doesNotMatch(clashing.stdout, /Put it in the config/);
+
+  // Ctrl-C ends the build under way, and the checkout goes
+  const running = spawn(process.execPath, [BENCH, "entries", "--config", config, "--out", out], {
+    env: { ...process.env, COMPILE_DELAY_MS: "3000" },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  let said = "";
+  running.stderr.on("data", (chunk) => (said += chunk));
+  const started = builds().length;
+  for (let waited = 0; builds().length < started + 2 && waited < 20000; waited += 50) {
+    await sleep(50);
+  }
+  running.kill("SIGINT");
+  assert.deepEqual(await once(running, "close"), [130, null]);
+  assert.equal(said, "Interrupted. Whatever was running has been ended.\n");
+  assert.equal(worktreesOf(repo), 1);
+  assert.deepEqual(readdirSync(join(out, "work")), []);
+  assert.equal(existsSync(join(out, "lock")), false);
+});
+
 test("sources that a link takes out of the checkout stop the plan", async (t) => {
   // The source directory is a committed link into a directory that git ignores and the config links in
   const repo = copyFixture(t);
@@ -1814,7 +2026,7 @@ test("sources that a link takes out of the checkout stop the plan", async (t) =>
   );
   const out = join(tempDir(t), "out");
 
-  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"]);
+  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"]);
   assert.equal(planned.code, 1);
   assert.match(planned.stderr, /^Linked: in HEAD, "src" is a link that leads out of the checkout through a path that the config links into it, or to no place that can be made out\./);
   assert.equal(existsSync(join(out, "plan.json")), false);
@@ -1832,7 +2044,7 @@ test("sources that a link takes out of the checkout stop the plan", async (t) =>
     config,
     JSON.stringify({ codebases: [{ label: "Shared", repo: monorepo, elmRoot: "client", check: [process.execPath, FAKE_COMPILER, "src/Main.elm"] }] })
   );
-  const shared = await runNode(BENCH, ["plan", "--config", config, "--out", join(tempDir(t), "out"), "--min-files", "1"]);
+  const shared = await runNode(BENCH, ["plan", "--config", config, "--out", join(tempDir(t), "out"), "--min-files", "1", "--levels", "100"]);
   assert.equal(shared.code, 1);
   assert.match(shared.stderr, /^Shared: 1 source file lies outside the Elm project root, src\/Types\.elm: behind a link that leads out of it, or in a source directory that the commit's elm\.json lists there\. A session's edits there would count as changes beside the project/);
 });
@@ -1854,7 +2066,7 @@ test("an elm.json that is a link to the operator's own stops the plan before any
 
   // With temporary files of its own, so that what the plan leaves among them can be seen
   const temporary = tempDir(t);
-  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"], { env: { ...process.env, TMPDIR: temporary } });
+  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"], { env: { ...process.env, TMPDIR: temporary } });
   assert.equal(planned.code, 1);
   assert.match(planned.stderr, /^Shared: in HEAD, the Elm root "\." has no elm\.json of its own\. It is missing there, or it is a link\./);
   assert.equal(existsSync(ran), false, "no command ran in the checkout");
@@ -1876,7 +2088,7 @@ test("an elm.json that is a link to the operator's own stops the plan before any
   git(repo, "commit", "--quiet", "--message", "a link out of the checkout");
   const escaping = [process.execPath, "-e", `require("fs").writeFileSync(${JSON.stringify(ran)}, ""); require("fs").writeFileSync("settings.json", "{}")`, "src/Main.elm"];
   writeFileSync(config, JSON.stringify({ codebases: [{ label: "Shared", repo, check: escaping }] }));
-  const again = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"], { env: { ...process.env, TMPDIR: temporary } });
+  const again = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"], { env: { ...process.env, TMPDIR: temporary } });
   assert.equal(again.code, 1);
   assert.match(again.stderr, /^Shared: in HEAD, "settings\.json" is a link that leads out of the checkout, or to no place that can be made out\. /);
   assert.equal(existsSync(ran), false);
@@ -1895,7 +2107,7 @@ test("a field rename that deletes an Elm module or adds one is no solution", asy
       codebases: [{ label: "Fixture", repo, check: [process.execPath, FAKE_COMPILER, "src/Main.elm", "src/FieldRename.elm", "src/TestRemoveVariant.elm"] }],
     })
   );
-  assert.equal((await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"])).code, 0);
+  assert.equal((await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"])).code, 0);
   const { tasks } = JSON.parse(readFileSync(join(out, "plan.json"), "utf-8"));
   assert.match(tasks.find((task) => task.type === "rename-field").prompt, /^Rename the field `name` of the record type alias `User` in `src\/Types\.elm` to `nameRenamed`\./);
 
@@ -1904,7 +2116,7 @@ test("a field rename that deletes an Elm module or adds one is no solution", asy
   const judged = async (edit, round) => {
     const ran = await runNode(BENCH, ["run", "--config", config, "--out", out, "--only", "rename-field", "--arms", "baseline", "--agent", standInAgent(t, edit), "--repeat", round]);
     assert.equal(ran.code, 0, ran.stderr);
-    const { outcome, problems } = JSON.parse(readFileSync(join(out, "runs", `Fixture--rename-field--baseline--${round}.json`), "utf-8"));
+    const { outcome, problems } = JSON.parse(readFileSync(join(out, "runs", `Fixture--rename-field--100--baseline--${round}.json`), "utf-8"));
     return { outcome, problems };
   };
   assert.deepEqual(await judged(rename, "1"), { outcome: "passed", problems: [] });
@@ -1932,14 +2144,14 @@ test("a module in a source directory below node_modules is renamed and judged li
   const out = join(tempDir(t), "out");
   const config = join(tempDir(t), "config.json");
   writeFileSync(config, JSON.stringify({ codebases: [{ label: "Shared", repo, check: [process.execPath, FAKE_COMPILER, "src/Main.elm"] }] }));
-  assert.equal((await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"])).code, 0);
+  assert.equal((await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"])).code, 0);
   const { tasks } = JSON.parse(readFileSync(join(out, "plan.json"), "utf-8"));
   assert.match(tasks.find((task) => task.type === "rename-module").prompt, /^Rename the module `Lib` to `LibRenamed`/);
 
   const judged = async (edit, round) => {
     const ran = await runNode(BENCH, ["run", "--config", config, "--out", out, "--only", "rename-module", "--arms", "baseline", "--agent", standInAgent(t, edit), "--repeat", round]);
     assert.equal(ran.code, 0, ran.stderr);
-    const record = join(out, "runs", `Shared--rename-module--baseline--${round}`);
+    const record = join(out, "runs", `Shared--rename-module--100--baseline--${round}`);
     const { outcome, problems } = JSON.parse(readFileSync(`${record}.json`, "utf-8"));
     return { outcome, problems, patch: readFileSync(`${record}.patch`, "utf-8") };
   };
@@ -1970,7 +2182,7 @@ test("the plan passes over what an Elm project inside the project uses", async (
   writeFileSync(config, JSON.stringify({ codebases: [{ label: "Fixture", repo, check: [process.execPath, FAKE_COMPILER, "src/Main.elm"] }] }));
   const out = join(tempDir(t), "out");
 
-  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"]);
+  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"]);
   assert.equal(planned.code, 0, planned.stderr);
   assert.match(
     planned.stdout,
@@ -1990,9 +2202,9 @@ test("the plan passes over what an Elm project inside the project uses", async (
     writeFileSync(join(shouting, "elm.json"), JSON.stringify({ ...elmJson, "source-directories": ["Src"] }));
     gitRepository(shouting);
     writeFileSync(config, JSON.stringify({ codebases: [{ label: "Fixture", repo: shouting, check: [process.execPath, FAKE_COMPILER, "Src/Main.elm", "SRC/FieldRename.elm", "src/TestRemoveVariant.elm"] }] }));
-    const read = await runNode(BENCH, ["plan", "--config", config, "--out", join(tempDir(t), "out"), "--min-files", "1"]);
+    const read = await runNode(BENCH, ["plan", "--config", config, "--out", join(tempDir(t), "out"), "--min-files", "1", "--levels", "100"]);
     assert.equal(read.code, 0, read.stderr);
-    assert.match(read.stdout, /^Fixture: 4 tasks in 5 modules, of which the check command compiles 5$/m);
+    assert.match(read.stdout, /^Fixture: 8 tasks in 5 modules, of which the check command compiles 5$/m);
     assert.doesNotMatch(read.stdout, /outside the project's source directories/);
   });
 });
@@ -2013,7 +2225,7 @@ test("a plan of several codebases keeps the checkout of each apart, and Lamdera'
   const config = join(tempDir(t), "config.json");
   writeFileSync(config, JSON.stringify({ codebases: [{ label: "First", repo: first, check }, { label: "Second", repo: second, check }] }));
 
-  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"]);
+  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"]);
   assert.equal(planned.code, 0, planned.stderr);
   // One slot per codebase: a plan that is killed in the second still finds the checkout of the first
   const slots = readFileSync(seen, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
@@ -2021,7 +2233,7 @@ test("a plan of several codebases keeps the checkout of each apart, and Lamdera'
   assert.deepEqual(readdirSync(join(out, "work")), []);
 
   const { tasks } = JSON.parse(readFileSync(join(out, "plan.json"), "utf-8"));
-  const moduleRename = (label) => tasks.find((task) => task.id === `${label}/rename-module`).prompt;
+  const moduleRename = (label) => tasks.find((task) => task.id === `${label}/rename-module/100`).prompt;
   assert.match(moduleRename("First"), /^Rename the module `Types` to `TypesRenamed`\./);
   assert.match(moduleRename("Second"), /^Rename the module `Utils` to `UtilsRenamed`\./);
   // Every prompt says that nothing else is to change, which is what the verdict holds a session to
@@ -2042,7 +2254,7 @@ test("the request to rename a module that a package exposes names elm.json", asy
   writeFileSync(config, JSON.stringify({ codebases: [{ label: "Package", repo, check: [process.execPath, FAKE_COMPILER, "src/Main.elm"] }] }));
   const out = join(tempDir(t), "out");
 
-  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"]);
+  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"]);
   assert.equal(planned.code, 0, planned.stderr);
   const { tasks } = JSON.parse(readFileSync(join(out, "plan.json"), "utf-8"));
   assert.match(
@@ -2063,7 +2275,7 @@ test("a session that commits its changes is judged by all of them, and told that
       codebases: [{ label: "Fixture", repo, check: [process.execPath, FAKE_COMPILER, "src/Main.elm", "src/FieldRename.elm", "src/TestRemoveVariant.elm"] }],
     })
   );
-  assert.equal((await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"])).code, 0);
+  assert.equal((await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"])).code, 0);
 
   // It renames the function, adds a function to a module that cannot use the target, and commits both.
   // "git -C . commit" is not among the commands a session is denied.
@@ -2078,7 +2290,7 @@ test("a session that commits its changes is judged by all of them, and told that
   const ran = await runNode(BENCH, ["run", "--config", config, "--out", out, "--only", "rename-function", "--arms", "baseline", "--agent", agent]);
   assert.equal(ran.code, 0, ran.stderr);
 
-  const record = JSON.parse(readFileSync(join(out, "runs", "Fixture--rename-function--baseline--1.json"), "utf-8"));
+  const record = JSON.parse(readFileSync(join(out, "runs", "Fixture--rename-function--100--baseline--1.json"), "utf-8"));
   assert.deepEqual(
     { outcome: record.outcome, problems: record.problems, changedFiles: record.changedFiles },
     {
@@ -2091,7 +2303,7 @@ test("a session that commits its changes is judged by all of them, and told that
       changedFiles: 3,
     }
   );
-  assert.match(readFileSync(join(out, "runs", "Fixture--rename-function--baseline--1.patch"), "utf-8"), /^\+extra : Int$/m);
+  assert.match(readFileSync(join(out, "runs", "Fixture--rename-function--100--baseline--1.patch"), "utf-8"), /^\+extra : Int$/m);
   assert.equal(worktreesOf(repo), 1);
 });
 
@@ -2108,7 +2320,7 @@ test("a rename that also changes a data file and a build script is no solution, 
       codebases: [{ label: "Fixture", repo, check: [process.execPath, FAKE_COMPILER, "src/Main.elm", "src/FieldRename.elm", "src/TestRemoveVariant.elm"] }],
     })
   );
-  assert.equal((await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"])).code, 0);
+  assert.equal((await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"])).code, 0);
 
   const rename = `for (const file of ["src/Types.elm", "src/Main.elm"]) {
     fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace(/\\bdefaultUser\\b/g, "defaultUserRenamed"));
@@ -2116,7 +2328,7 @@ test("a rename that also changes a data file and a build script is no solution, 
   const judged = async (agent, round) => {
     const ran = await runNode(BENCH, ["run", "--config", config, "--out", out, "--only", "rename-function", "--arms", "baseline", "--agent", agent, "--repeat", round]);
     assert.equal(ran.code, 0, ran.stderr);
-    const { outcome, problems } = JSON.parse(readFileSync(join(out, "runs", `Fixture--rename-function--baseline--${round}.json`), "utf-8"));
+    const { outcome, problems } = JSON.parse(readFileSync(join(out, "runs", `Fixture--rename-function--100--baseline--${round}.json`), "utf-8"));
     return { outcome, problems };
   };
 
@@ -2139,7 +2351,7 @@ test("a rename that also rewrites a file beside the Elm project is no solution",
   const config = join(tempDir(t), "config.json");
   const check = [process.execPath, FAKE_COMPILER, "src/Main.elm", "src/FieldRename.elm", "src/TestRemoveVariant.elm"];
   writeFileSync(config, JSON.stringify({ codebases: [{ label: "Fixture", repo, elmRoot: "client", check }] }));
-  assert.equal((await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"])).code, 0);
+  assert.equal((await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"])).code, 0);
 
   // A session works in the Elm root
   const rename = `for (const file of ["src/Types.elm", "src/Main.elm"]) {
@@ -2148,7 +2360,7 @@ test("a rename that also rewrites a file beside the Elm project is no solution",
   const judged = async (agent, round) => {
     const ran = await runNode(BENCH, ["run", "--config", config, "--out", out, "--only", "rename-function", "--arms", "baseline", "--agent", agent, "--repeat", round]);
     assert.equal(ran.code, 0, ran.stderr);
-    const { outcome, problems, changedFiles } = JSON.parse(readFileSync(join(out, "runs", `Fixture--rename-function--baseline--${round}.json`), "utf-8"));
+    const { outcome, problems, changedFiles } = JSON.parse(readFileSync(join(out, "runs", `Fixture--rename-function--100--baseline--${round}.json`), "utf-8"));
     return { outcome, problems, changedFiles };
   };
 
@@ -2158,13 +2370,13 @@ test("a rename that also rewrites a file beside the Elm project is no solution",
     problems: ["changed files that are no Elm sources of the project: ../README.md"],
     changedFiles: 3,
   });
-  assert.match(readFileSync(join(out, "runs", "Fixture--rename-function--baseline--1.patch"), "utf-8"), /^-How to build$/m);
+  assert.match(readFileSync(join(out, "runs", "Fixture--rename-function--100--baseline--1.patch"), "utf-8"), /^-How to build$/m);
 
   // A note beside the project is a file the commit does not hold, as one in the project is. It is
   // kept in the patch and is no changed file of the project.
   const untidy = standInAgent(t, `${rename}\n  fs.writeFileSync("../notes.txt", "done\\n");\n  fs.writeFileSync("index.html", "<html></html>\\n");`);
   assert.deepEqual(await judged(untidy, "2"), { outcome: "passed", problems: [], changedFiles: 2 });
-  assert.match(readFileSync(join(out, "runs", "Fixture--rename-function--baseline--2.patch"), "utf-8"), /^\+done$/m);
+  assert.match(readFileSync(join(out, "runs", "Fixture--rename-function--100--baseline--2.patch"), "utf-8"), /^\+done$/m);
   assert.equal(worktreesOf(repo), 1);
 });
 
@@ -2180,7 +2392,7 @@ test("a plan without a target names the file that holds back the most candidates
   const config = join(tempDir(t), "config.json");
   writeFileSync(config, JSON.stringify({ codebases: [{ label: "Fixture", repo, check: [process.execPath, FAKE_COMPILER, "src/Main.elm"] }] }));
 
-  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", join(tempDir(t), "out"), "--min-files", "1"]);
+  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", join(tempDir(t), "out"), "--min-files", "1", "--levels", "100"]);
   assert.equal(planned.code, 0, planned.stderr);
   assert.match(
     planned.stdout,
@@ -2203,7 +2415,7 @@ test("a type that cannot be given a variant is passed over, and a plan says why 
     writeFileSync(join(repo, "src/Main.elm"), main);
     gitRepository(repo);
     const out = join(tempDir(t), "out");
-    const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"]);
+    const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"]);
     assert.equal(planned.code, 0, planned.stderr);
     return { stdout: planned.stdout, task: JSON.parse(readFileSync(join(out, "plan.json"), "utf-8")).tasks.find((task) => task.type === "add-variant") };
   };
@@ -2231,7 +2443,7 @@ test("a type that cannot be given a variant is passed over, and a plan says why 
   const slow = `if (require("fs").readFileSync("src/Many.elm", "utf-8").includes("AddedByBenchmark")) setTimeout(() => {}, 60000)`;
   writeFileSync(config, JSON.stringify({ codebases: [{ label: "Fixture", repo, check: [process.execPath, "-e", slow, "--", "src/Main.elm"], checkTimeoutMs: 2000 }] }));
   const out = join(tempDir(t), "out");
-  const cut = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"]);
+  const cut = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"]);
   assert.equal(cut.code, 1);
   assert.match(
     cut.stderr,
@@ -2255,7 +2467,7 @@ test("a check command that rewrites a file of the commit stops the plan", async 
     const out = join(tempDir(t), "out");
 
     // A session that ran the command would have changed a file that is no Elm source, and one that did not would not
-    const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"]);
+    const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"]);
     assert.equal(planned.code, 1);
     assert.match(planned.stderr, /^Fixture: ".*" writes 1 file that the commit holds, public\/elm\.js\. A session that ran it would be judged by what it wrote there, and one that did not would not\. Have it write where the repository holds nothing, as with --output=\/dev\/null\.$/m);
     assert.equal(existsSync(join(out, "plan.json")), false);
@@ -2270,7 +2482,7 @@ test("a check command that rewrites a file of the commit stops the plan", async 
   const compile = `require("fs").writeFileSync("elm-stuff/0.19.1/Main.elmo", "new")`;
   const config = join(tempDir(t), "config.json");
   writeFileSync(config, JSON.stringify({ codebases: [{ label: "Cached", repo: cached, check: [process.execPath, "-e", compile, "src/Main.elm"] }] }));
-  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", join(tempDir(t), "out"), "--min-files", "1"]);
+  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", join(tempDir(t), "out"), "--min-files", "1", "--levels", "100"]);
   assert.equal(planned.code, 1);
   assert.match(planned.stderr, /writes 1 file that the commit holds, elm-stuff\/0\.19\.1\/Main\.elmo\. .* would not\. The commit holds the compiler's cache\. Benchmark a commit without elm-stuff\.$/m);
 
@@ -2294,7 +2506,7 @@ test("a check command that rewrites a file of the commit stops the plan", async 
       `import(${JSON.stringify(FAKE_COMPILER)})`;
     writeFileSync(config, JSON.stringify({ codebases: [{ label: module, repo: stamped, check: [process.execPath, "-e", generate, "src/Main.elm"] }] }));
     const out = join(tempDir(t), "out");
-    const generated = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"]);
+    const generated = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"]);
     assert.equal(generated.code, 1, module);
     assert.match(
       generated.stderr,
@@ -2317,7 +2529,7 @@ test("a check command that rewrites a file of the commit stops the plan", async 
     `fs.writeFileSync("build.log", ""); import(${JSON.stringify(FAKE_COMPILER)})`;
   writeFileSync(config, JSON.stringify({ codebases: [{ label: "Late", repo: late, check: [process.execPath, "-e", second, "src/Main.elm"] }] }));
   const lateOut = join(tempDir(t), "out");
-  const secondRun = await runNode(BENCH, ["plan", "--config", config, "--out", lateOut, "--min-files", "1"]);
+  const secondRun = await runNode(BENCH, ["plan", "--config", config, "--out", lateOut, "--min-files", "1", "--levels", "100"]);
   assert.equal(secondRun.code, 1);
   assert.match(
     secondRun.stderr,
@@ -2331,7 +2543,7 @@ test("a check command that rewrites a file of the commit stops the plan", async 
   gitRepository(locked);
   const lock = `const fs = require("fs"); if (fs.existsSync("build.lock")) { console.error("build.lock is in the way"); process.exit(1); } fs.writeFileSync("build.lock", "")`;
   writeFileSync(config, JSON.stringify({ codebases: [{ label: "Locked", repo: locked, check: [process.execPath, "-e", lock, "src/Main.elm"] }] }));
-  const twice = await runNode(BENCH, ["plan", "--config", config, "--out", join(tempDir(t), "out"), "--min-files", "1"]);
+  const twice = await runNode(BENCH, ["plan", "--config", config, "--out", join(tempDir(t), "out"), "--min-files", "1", "--levels", "100"]);
   assert.equal(twice.code, 1);
   assert.match(twice.stderr, /^Locked: on .*, built a second time without a change, the check command fails: build\.lock is in the way$/m);
   assert.equal(worktreesOf(locked), 1);
@@ -2342,7 +2554,7 @@ test("a check command that rewrites a file of the commit stops the plan", async 
   const log = `require("fs").writeFileSync("build.log", "built at " + Date.now() + "\\n"); import(${JSON.stringify(FAKE_COMPILER)})`;
   writeFileSync(config, JSON.stringify({ codebases: [{ label: "Logged", repo: logged, check: [process.execPath, "-e", log, "src/Main.elm"] }] }));
   const loggedOut = join(tempDir(t), "out");
-  const goesOn = await runNode(BENCH, ["plan", "--config", config, "--out", loggedOut, "--min-files", "1"]);
+  const goesOn = await runNode(BENCH, ["plan", "--config", config, "--out", loggedOut, "--min-files", "1", "--levels", "100"]);
   assert.equal(goesOn.code, 0, goesOn.stderr);
   assert.ok(existsSync(join(loggedOut, "plan.json")));
 });
@@ -2362,7 +2574,7 @@ test("a check command that names a file of the operator's checkout behind an opt
     writeFileSync(config, JSON.stringify({ codebases: [{ label: "Fixture", repo, check: [process.execPath, "-e", build, "src/Main.elm", `--output=${output}`] }] }));
     const out = join(tempDir(t), "out");
 
-    const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"]);
+    const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"]);
     assert.equal(planned.code, 1);
     assert.ok(planned.stderr.startsWith(`Invalid benchmark config: codebases[0].check names ${output}, a path inside the repository.`), planned.stderr);
     assert.equal(readFileSync(bundle, "utf-8"), "// sentinel\n");
@@ -2390,7 +2602,7 @@ test("a file beside an Elm root that is a link is named from where the root real
   const config = join(tempDir(t), "config.json");
   const check = [process.execPath, FAKE_COMPILER, "src/Main.elm", "src/FieldRename.elm", "src/TestRemoveVariant.elm"];
   writeFileSync(config, JSON.stringify({ codebases: [{ label: "Fixture", repo, elmRoot: "client", check }] }));
-  assert.equal((await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"])).code, 0);
+  assert.equal((await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"])).code, 0);
 
   const agent = standInAgent(
     t,
@@ -2401,7 +2613,7 @@ test("a file beside an Elm root that is a link is named from where the root real
   );
   const ran = await runNode(BENCH, ["run", "--config", config, "--out", out, "--only", "rename-function", "--arms", "baseline", "--agent", agent]);
   assert.equal(ran.code, 0, ran.stderr);
-  const { outcome, problems } = JSON.parse(readFileSync(join(out, "runs", "Fixture--rename-function--baseline--1.json"), "utf-8"));
+  const { outcome, problems } = JSON.parse(readFileSync(join(out, "runs", "Fixture--rename-function--100--baseline--1.json"), "utf-8"));
   assert.deepEqual(
     { outcome, problems },
     { outcome: "wrong-result", problems: ["../Extra.elm is a new file, which no rename asks for", "changed files that cannot use the target: ../Extra.elm"] }
@@ -2422,11 +2634,12 @@ test("the plan passes over what a source file behind a link uses", async (t) => 
   writeFileSync(config, JSON.stringify({ codebases: [{ label: "Fixture", repo, check }] }));
   const out = join(tempDir(t), "out");
 
-  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"]);
+  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"]);
   assert.equal(planned.code, 0, planned.stderr);
-  assert.match(planned.stdout, /Fixture: 2 possible targets were left out because a file they involve is reached through a link\./);
+  assert.match(planned.stdout, /Fixture: 5 possible targets were left out because a file they involve is reached through a link\./);
+  assert.match(planned.stdout, /^Fixture: no suitable target for rename-type\. Its candidates were left out: 1 that involves a file that is reached through a link$/m);
   const { tasks, codebases } = JSON.parse(readFileSync(join(out, "plan.json"), "utf-8"));
-  assert.equal(codebases[0].linked, 2);
+  assert.equal(codebases[0].linked, 5);
   // Without the link, the function to rename is one of Types.elm
   const mayChange = tasks.flatMap((task) => task.expect.filter((expectation) => expectation.kind === "changes-only-in").flatMap((expectation) => expectation.files));
   assert.ok(tasks.length > 0 && !mayChange.includes("src/Types.elm"), JSON.stringify(mayChange));
@@ -2441,7 +2654,7 @@ test("the plan passes over what a source file behind a link uses", async (t) => 
   }
   gitRepository(both);
   writeFileSync(config, JSON.stringify({ codebases: [{ label: "Fixture", repo: both, check }] }));
-  const none = await runNode(BENCH, ["plan", "--config", config, "--out", join(tempDir(t), "out"), "--min-files", "1"]);
+  const none = await runNode(BENCH, ["plan", "--config", config, "--out", join(tempDir(t), "out"), "--min-files", "1", "--levels", "100"]);
   assert.equal(none.code, 0, none.stderr);
   assert.match(none.stdout, /^Fixture: no suitable target for rename-function\. Its candidates were left out: 1 that an Elm file outside the project can use, 2 that involve a file that is reached through a link$/m);
   assert.match(none.stdout, /^Fixture: no suitable target for rename-module\. Its candidates were left out: 1 that an Elm file outside the project can use, 1 that involves a file that is reached through a link$/m);
@@ -2479,7 +2692,7 @@ async function plannedFixture(t) {
   const config = join(tempDir(t), "config.json");
   const check = [process.execPath, FAKE_COMPILER, "src/Main.elm", "src/FieldRename.elm", "src/TestRemoveVariant.elm"];
   writeFileSync(config, JSON.stringify({ codebases: [{ label: "Fixture", repo, check }] }));
-  assert.equal((await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"])).code, 0);
+  assert.equal((await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"])).code, 0);
   return { repo, out, config, codebase: loadConfig(config).codebases[0], common: ["--config", config, "--out", out, "--agent", FAKE_AGENT] };
 }
 
@@ -2503,7 +2716,7 @@ test("Ctrl-C in a terminal ends the sessions and lets the benchmark's own git co
 
   assert.equal(code, 130);
   // The session has its record, so no later run comes back for its checkout. It has to be gone now.
-  assert.ok(existsSync(join(out, "runs", "Fixture--rename-function--baseline--1.json")));
+  assert.ok(existsSync(join(out, "runs", "Fixture--rename-function--100--baseline--1.json")));
   assert.deepEqual(readdirSync(join(out, "work")), []);
   assert.equal(worktreesOf(repo), 1);
 });
@@ -2583,7 +2796,7 @@ test("a stop while the plan removes its last checkout leaves no plan", async (t)
   const real = execFileSync("which", ["git"]).toString().trim();
   writeFileSync(join(bin, "git"), `#!/bin/sh\ncase " $* " in *" worktree remove "*) kill -INT $PPID ;; esac\nexec ${JSON.stringify(real)} "$@"\n`, { mode: 0o755 });
 
-  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
   assert.equal(planned.code, 130, planned.stderr);
   assert.match(planned.stderr, /^Interrupted\. Whatever was running has been ended\. No plan was written\.$/m);
   assert.equal(existsSync(join(out, "plan.json")), false);
@@ -2609,7 +2822,7 @@ test("sessions that run side by side add and remove their checkouts one after th
 
   // A record says how many sessions ran beside it, since its time depends on that. A resumed run may take another number.
   const concurrencyOf = (repetition) =>
-    ["baseline", "lsp"].map((arm) => JSON.parse(readFileSync(join(out, "runs", `Fixture--rename-function--${arm}--${repetition}.json`), "utf-8")).concurrency);
+    ["baseline", "lsp"].map((arm) => JSON.parse(readFileSync(join(out, "runs", `Fixture--rename-function--100--${arm}--${repetition}.json`), "utf-8")).concurrency);
   assert.deepEqual([1, 2, 3, 4].flatMap(concurrencyOf), Array(8).fill(4));
   const resumed = await runNode(BENCH, ["run", ...common, "--only", "rename-function", "--repeat", "5"], { env: { ...process.env, FAKE_AGENT: "solve" } });
   assert.equal(resumed.code, 0, resumed.stderr);
@@ -2650,7 +2863,7 @@ fs.linkSync = (source, destination) => {
 syncBuiltinESMExports();
 `);
   // Load the observer before the command, without exposing it to compiler subprocesses.
-  const checked = await runNode("--import", [observer, BENCH, "plan", "--config", config, "--out", out, "--min-files", "1"]);
+  const checked = await runNode("--import", [observer, BENCH, "plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"]);
   assert.equal(checked.code, 0, checked.stderr);
   assert.equal(readFileSync(observed, "utf8"), "observed");
   assert.equal(existsSync(join(out, "lock")), false);
@@ -2671,7 +2884,7 @@ syncBuiltinESMExports();
 `);
   for (const code of ["EPERM", "ENOTSUP", "EXDEV"]) {
     const out = tempDir(t);
-    const refused = await runNode("--import", [unlinkable, BENCH, "plan", "--config", config, "--out", out, "--min-files", "1"], {
+    const refused = await runNode("--import", [unlinkable, BENCH, "plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"], {
       env: { ...process.env, LINK_ERROR: code },
     });
     assert.equal(refused.code, 1, code);
@@ -2685,7 +2898,7 @@ test("a lock that names no positive whole process id can be taken over", async (
   for (const text of ["", "0", "-1", "someone", "1.5"]) {
     const out = tempDir(t);
     writeFileSync(join(out, "lock"), text);
-    const ran = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"]);
+    const ran = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"]);
     assert.equal(ran.code, 0, `${JSON.stringify(text)}: ${ran.stderr}`);
     assert.equal(existsSync(join(out, "lock")), false);
     assert.equal(existsSync(join(out, "plan.json")), true);
@@ -2729,7 +2942,7 @@ test("one benchmark at a time works in an output directory, and clears what an e
   // A benchmark that was killed outright leaves its lock, and the checkout of the session it was at
   writeFileSync(join(out, "lock"), "999999999");
   assert.equal((await run("solve")).code, 0);
-  const slot = join(out, "work", "Fixture--rename-function--baseline--1");
+  const slot = join(out, "work", "Fixture--rename-function--100--baseline--1");
   const left = await openCheckout(codebase, slot);
   assert.equal(worktreesOf(repo), 2);
   // That session has its record, so no run would open its slot again. The next run clears it all the same.
@@ -2753,7 +2966,7 @@ test("Ctrl-C during the build before a session keeps the session from starting",
   const out = join(tempDir(t), "out");
   const config = join(tempDir(t), "config.json");
   writeFileSync(config, JSON.stringify({ codebases: [{ label: "Fixture", repo, check: [process.execPath, FAKE_COMPILER, "src/Main.elm"] }] }));
-  assert.equal((await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"])).code, 0);
+  assert.equal((await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"])).code, 0);
 
   const running = spawn(process.execPath, [BENCH, "run", "--config", config, "--out", out, "--agent", FAKE_AGENT, "--arms", "baseline"], {
     env: { ...process.env, FAKE_AGENT: "solve", FAKE_COMPILER_DELAY_MS: "3000" },
@@ -2776,7 +2989,7 @@ test("Ctrl-C during the build before a session keeps the session from starting",
 
   // The same during the build of a plan, which then writes none
   const again = join(tempDir(t), "out");
-  const planning = spawn(process.execPath, [BENCH, "plan", "--config", config, "--out", again, "--min-files", "1"], {
+  const planning = spawn(process.execPath, [BENCH, "plan", "--config", config, "--out", again, "--min-files", "1", "--levels", "100"], {
     env: { ...process.env, FAKE_COMPILER_DELAY_MS: "3000" },
     stdio: ["ignore", "ignore", "pipe"],
   });
@@ -2799,7 +3012,7 @@ for (const signal of ["SIGINT", "SIGHUP"]) {
     const out = join(tempDir(t), "out");
     const config = join(tempDir(t), "config.json");
     writeFileSync(config, JSON.stringify({ codebases: [{ label: "Fixture", repo, check: [process.execPath, FAKE_COMPILER, "src/Main.elm"] }] }));
-    assert.equal((await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"])).code, 0);
+    assert.equal((await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"])).code, 0);
 
     // Every build takes a second and a half: the one before the session, and the one that judges it
     const running = spawn(
@@ -2808,7 +3021,7 @@ for (const signal of ["SIGINT", "SIGHUP"]) {
       { env: { ...process.env, FAKE_AGENT: "solve", FAKE_COMPILER_DELAY_MS: "1500" }, stdio: "ignore" }
     );
     // The session is over once its transcript holds the result. The build that judges it follows.
-    const transcript = join(out, "runs", "Fixture--rename-function--baseline--1.jsonl");
+    const transcript = join(out, "runs", "Fixture--rename-function--100--baseline--1.jsonl");
     const sessionOver = () => existsSync(transcript) && readFileSync(transcript, "utf-8").includes('"type":"result"');
     for (let waited = 0; !sessionOver() && waited < 15000; waited += 50) {
       await sleep(50);
@@ -2830,7 +3043,7 @@ test("run stops before its first session when it cannot list the machine's proce
   const out = join(tempDir(t), "out");
   const config = join(tempDir(t), "config.json");
   writeFileSync(config, JSON.stringify({ codebases: [{ label: "Fixture", repo, check: [process.execPath, FAKE_COMPILER, "src/Main.elm"] }] }));
-  assert.equal((await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"])).code, 0);
+  assert.equal((await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"])).code, 0);
 
   // A PATH that has git, and no ps
   const bin = tempDir(t);
@@ -2850,7 +3063,7 @@ test("a session that waits for the model until its time is up is no result of it
   const out = join(tempDir(t), "out");
   const config = join(tempDir(t), "config.json");
   writeFileSync(config, JSON.stringify({ codebases: [{ label: "Fixture", repo, check: [process.execPath, FAKE_COMPILER, "src/Main.elm"] }] }));
-  assert.equal((await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"])).code, 0);
+  assert.equal((await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"])).code, 0);
 
   // The first stand-in gets no answer and waits. A little over a second in, the benchmark tells it to stop.
   // The second works one turn before that, and asks again for the answer to its next request.
@@ -2874,7 +3087,7 @@ test("a run is held to the version of Claude Code that its first session reporte
   const out = join(tempDir(t), "out");
   const config = join(tempDir(t), "config.json");
   writeFileSync(config, JSON.stringify({ codebases: [{ label: "Fixture", repo, check: [process.execPath, FAKE_COMPILER, "src/Main.elm"] }] }));
-  assert.equal((await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"])).code, 0);
+  assert.equal((await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"])).code, 0);
   const run = (versions, ...more) =>
     runNode(BENCH, ["run", "--config", config, "--out", out, "--agent", FAKE_AGENT, "--only", "rename-function", "--arms", "baseline", ...more], {
       env: { ...process.env, FAKE_AGENT: "solve", ...versions },
@@ -2921,7 +3134,7 @@ test("a run is held to the effort it was started with, and the report names it",
   for (const { args, variables, effortLevel } of started) {
     assert.deepEqual([args[args.indexOf("--effort") + 1], effortLevel, variables.includes("MAX_THINKING_TOKENS")], ["high", "high", false]);
   }
-  assert.equal(JSON.parse(readFileSync(join(out, "runs", "Fixture--rename-function--baseline--1.json"), "utf-8")).effort, "high");
+  assert.equal(JSON.parse(readFileSync(join(out, "runs", "Fixture--rename-function--100--baseline--1.json"), "utf-8")).effort, "high");
   assert.equal(JSON.parse(readFileSync(join(out, "run.json"), "utf-8")).effort, "high");
 
   const unset = await run("--repeat", "2");
@@ -2946,7 +3159,7 @@ test("a run is held to the effort it was started with, and the report names it",
   for (const { args, effortLevel } of readFileSync(notes, "utf-8").trim().split("\n").map((line) => JSON.parse(line))) {
     assert.deepEqual([args.includes("--effort"), effortLevel], [false, null]);
   }
-  assert.equal(JSON.parse(readFileSync(join(fresh.out, "runs", "Fixture--rename-function--baseline--1.json"), "utf-8")).effort, null);
+  assert.equal(JSON.parse(readFileSync(join(fresh.out, "runs", "Fixture--rename-function--100--baseline--1.json"), "utf-8")).effort, null);
   const named = await runNode(BENCH, ["run", ...fresh.common, "--only", "rename-function", "--arms", "baseline", "--repeat", "2", "--effort", "high"], {
     env: { ...process.env, FAKE_AGENT: "solve" },
   });
@@ -2979,7 +3192,7 @@ test("a session that wrecks its project or comes up wrongly equipped is accounte
   const bench = (args, mode) => runNode(BENCH, [...args, "--out", out], { env: { ...process.env, FAKE_AGENT: mode } });
   const run = (only, mode, ...more) => bench(["run", "--config", config, "--only", only, "--agent", FAKE_AGENT, ...more], mode);
   const recordOf = (id) => JSON.parse(readFileSync(join(out, "runs", `${id}.json`), "utf-8"));
-  assert.equal((await bench(["plan", "--config", config, "--min-files", "1"])).code, 0);
+  assert.equal((await bench(["plan", "--config", config, "--min-files", "1", "--levels", "100"])).code, 0);
 
   // With elm.json gone the project cannot be read, and that is still a result
   const wrecked = await run("rename-module", "wreck", "--arms", "baseline");
@@ -2994,20 +3207,20 @@ test("a session that wrecks its project or comes up wrongly equipped is accounte
   assert.match(readFileSync(join(out, "report.html"), "utf-8"), oneArm);
   // The stand-in compiler reads no elm.json, so the build passed. What is known of a result is
   // kept when the rest cannot be judged.
-  const judged = recordOf("Fixture--rename-module--baseline--1");
+  const judged = recordOf("Fixture--rename-module--100--baseline--1");
   assert.equal(judged.outcome, "wrong-result");
   assert.match(judged.problems[0], /^the result could not be judged: /);
   assert.equal(worktreesOf(repo), 1);
 
   // Without its .git a checkout cannot be read at all, and the check never runs. That is counted with what
   // does not compile. The record says why in one line, where git goes on with how it is to be used.
-  assert.match((await run("rename-module", "unreadable", "--arms", "lsp")).stdout, /Fixture\/rename-module  lsp  #1  does-not-compile/);
-  assert.match(recordOf("Fixture--rename-module--lsp--1").problems[0], /^the result could not be judged: git diff [^\n]+: [^\n]*Not a git repository[^\n]*$/);
+  assert.match((await run("rename-module", "unreadable", "--arms", "lsp")).stdout, /Fixture\/rename-module\/100  lsp  #1  does-not-compile/);
+  assert.match(recordOf("Fixture--rename-module--100--lsp--1").problems[0], /^the result could not be judged: git diff [^\n]+: [^\n]*Not a git repository[^\n]*$/);
   assert.equal(worktreesOf(repo), 1);
 
   // The language server not starting is the lsp arm's failure, whatever the agent then did by hand
   assert.match((await run("rename-function", "serverless")).stdout, /lsp  #1  server-failed/);
-  assert.equal(recordOf("Fixture--rename-function--baseline--1").outcome, "wrong-result");
+  assert.equal(recordOf("Fixture--rename-function--100--baseline--1").outcome, "wrong-result");
 
   // A tool that neither arm should have stops the run before it measures the wrong thing: at the
   // isolation check, which asks for no tool at all, or at the first session that shows one
@@ -3043,7 +3256,7 @@ test("a session that wrecks its project or comes up wrongly equipped is accounte
   // A request that the API turns down as too long is the session's own doing, and a result of its arm
   const overlong = await run("rename-function", "overlong", "--repeat", "2", "--arms", "baseline");
   assert.equal(overlong.code, 0, overlong.stderr);
-  const { outcome, failure, apiErrorStatus, apiRetries } = recordOf("Fixture--rename-function--baseline--2");
+  const { outcome, failure, apiErrorStatus, apiRetries } = recordOf("Fixture--rename-function--100--baseline--2");
   assert.deepEqual({ outcome, failure, apiErrorStatus, apiRetries }, { outcome: "agent-failed", failure: "error", apiErrorStatus: 400, apiRetries: 1 });
   // The API answers with the same status once a spending limit is reached. That is a lost API, and so
   // is a connection that broke and left no word behind.
@@ -3063,14 +3276,14 @@ test("a session that wrecks its project or comes up wrongly equipped is accounte
     const round = String(3 + at);
     const again = await run("rename-function", "overlong", "--repeat", round, "--arms", "baseline");
     assert.equal(again.code, 0, again.stderr);
-    assert.equal(recordOf(`Fixture--rename-function--baseline--${round}`).outcome, "agent-failed");
+    assert.equal(recordOf(`Fixture--rename-function--100--baseline--${round}`).outcome, "agent-failed");
   }
   delete process.env.FAKE_TOO_LONG;
   // A 413 says that the request held too much, whatever words come with it. Its session is recorded, and the next one runs.
   const oversized = await run("rename-function", "oversized", "--repeat", "6", "--arms", "baseline");
   assert.equal(oversized.code, 0, oversized.stderr);
   for (const round of ["5", "6"]) {
-    const { outcome, failure, apiErrorStatus } = recordOf(`Fixture--rename-function--baseline--${round}`);
+    const { outcome, failure, apiErrorStatus } = recordOf(`Fixture--rename-function--100--baseline--${round}`);
     assert.deepEqual({ outcome, failure, apiErrorStatus }, { outcome: "agent-failed", failure: "error", apiErrorStatus: 413 });
   }
 
@@ -3088,7 +3301,7 @@ test("a session that wrecks its project or comes up wrongly equipped is accounte
 
   // A record is written whole or not at all. One that something else cut short is named.
   assert.deepEqual(readdirSync(join(out, "runs")).filter((file) => file.endsWith(".part")), []);
-  const record = join(out, "runs", "Fixture--rename-function--baseline--1.json");
+  const record = join(out, "runs", "Fixture--rename-function--100--baseline--1.json");
   writeFileSync(record, readFileSync(record, "utf-8").slice(0, 200));
   const cut = await bench(["report"]);
   assert.equal(cut.code, 1);
@@ -3140,12 +3353,12 @@ test("with the real compiler, added branches in a subdirectory keep strings unch
   writeFileSync(config, JSON.stringify({ codebases: [{ label: "Shapes", repo, elmRoot: "client", check: ["elm", "make", "src/Main.elm", "--output=/dev/null"] }] }));
   for (const [mode, { taken }] of Object.entries(SHAPE_EDITS)) {
     const out = join(tempDir(t), "out");
-    const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"]);
+    const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"]);
     assert.equal(planned.code, 0, planned.stderr);
     const agent = standInAgent(t, `fs.writeFileSync("src/Main.elm", ${JSON.stringify(addShapeBranch(SHAPE_EXAMPLE, mode))});`);
     const ran = await runNode(BENCH, ["run", "--config", config, "--out", out, "--only", "add-variant", "--arms", "baseline", "--agent", agent]);
     assert.equal(ran.code, 0, ran.stderr);
-    const record = JSON.parse(readFileSync(join(out, "runs/Shapes--add-variant--baseline--1.json"), "utf8"));
+    const record = JSON.parse(readFileSync(join(out, "runs/Shapes--add-variant--100--baseline--1.json"), "utf8"));
     if (taken) {
       assert.equal(record.outcome, "passed", mode);
       assert.deepEqual(record.problems, []);
@@ -3226,11 +3439,11 @@ test("with the real compiler, a catch-all that only carries the variant's name i
     );
   const outcomeWith = async (agent) => {
     const out = join(tempDir(t), "out");
-    const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"]);
+    const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"]);
     assert.equal(planned.code, 0, planned.stderr);
     const ran = await runNode(BENCH, ["run", "--config", config, "--out", out, "--only", "add-variant", "--arms", "baseline", "--agent", agent]);
     assert.equal(ran.code, 0, ran.stderr);
-    const { outcome, problems } = JSON.parse(readFileSync(join(out, "runs", "Shapes--add-variant--baseline--1.json"), "utf-8"));
+    const { outcome, problems } = JSON.parse(readFileSync(join(out, "runs", "Shapes--add-variant--100--baseline--1.json"), "utf-8"));
     return { outcome, problems };
   };
 
@@ -3295,7 +3508,7 @@ test("with the real compiler, the plan adds its variant to the declared type and
   const config = join(tempDir(t), "config.json");
   writeFileSync(config, JSON.stringify({ codebases: [{ label: "Shapes", repo, check: ["elm", "make", "src/Main.elm", "--output=/dev/null"] }] }));
   const out = join(tempDir(t), "out");
-  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"]);
+  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"]);
   assert.equal(planned.code, 0, planned.stderr);
   const task = JSON.parse(readFileSync(join(out, "plan.json"), "utf-8")).tasks.find((task) => task.type === "add-variant");
   assert.match(task?.prompt ?? planned.stdout, /as the last variant of the custom type `Shape` in `src\/Main\.elm`/);
@@ -3339,7 +3552,7 @@ test("with the real compiler, a variant whose argument stands below a blank line
   const config = join(tempDir(t), "config.json");
   writeFileSync(config, JSON.stringify({ codebases: [{ label: "Shapes", repo, check: ["elm", "make", "src/Main.elm", "--output=/dev/null"] }] }));
   const out = join(tempDir(t), "out");
-  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"]);
+  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"]);
   assert.equal(planned.code, 0, planned.stderr);
   assert.deepEqual(JSON.parse(readFileSync(join(out, "plan.json"), "utf-8")).tasks.filter((task) => task.type === "add-variant"), []);
   assert.match(planned.stdout, /Shapes: no suitable target for add-variant\. The project still compiled with the change made to the one target that was tried/);
@@ -3356,12 +3569,12 @@ async function addVariantOutcome(t, before, after) {
   const config = join(tempDir(t), "config.json");
   writeFileSync(config, JSON.stringify({ codebases: [{ label: "Shapes", repo, check: ["elm", "make", "src/Main.elm", "--output=/dev/null"] }] }));
   const out = join(tempDir(t), "out");
-  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"]);
+  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"]);
   assert.equal(planned.code, 0, planned.stderr);
   const agent = standInAgent(t, `fs.writeFileSync("src/Main.elm", ${JSON.stringify(after)});`);
   const ran = await runNode(BENCH, ["run", "--config", config, "--out", out, "--only", "add-variant", "--arms", "baseline", "--agent", agent]);
   assert.equal(ran.code, 0, ran.stderr);
-  const { outcome, problems } = JSON.parse(readFileSync(join(out, "runs", "Shapes--add-variant--baseline--1.json"), "utf-8"));
+  const { outcome, problems } = JSON.parse(readFileSync(join(out, "runs", "Shapes--add-variant--100--baseline--1.json"), "utf-8"));
   return { outcome, problems };
 }
 
@@ -3474,11 +3687,11 @@ test("with the real compiler, a rename that also rewrote a string is told from o
     );
   const outcomeWith = async (agent) => {
     const out = join(tempDir(t), "out");
-    const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"]);
+    const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"]);
     assert.equal(planned.code, 0, planned.stderr);
     const ran = await runNode(BENCH, ["run", "--config", config, "--out", out, "--only", "rename-function", "--arms", "baseline", "--agent", agent]);
     assert.equal(ran.code, 0, ran.stderr);
-    const { outcome, problems } = JSON.parse(readFileSync(join(out, "runs", "Lib--rename-function--baseline--1.json"), "utf-8"));
+    const { outcome, problems } = JSON.parse(readFileSync(join(out, "runs", "Lib--rename-function--100--baseline--1.json"), "utf-8"));
     return { outcome, problems };
   };
 
@@ -3529,7 +3742,7 @@ test("with the real compiler, a module, a variant and a function named in letter
   const config = join(tempDir(t), "config.json");
   writeFileSync(config, JSON.stringify({ codebases: [{ label: "Bistro", repo, check: ["elm", "make", "src/Main.elm", "--output=/dev/null"] }] }));
   const out = join(tempDir(t), "out");
-  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"]);
+  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"]);
   assert.equal(planned.code, 0, planned.stderr);
   const prompts = Object.fromEntries(JSON.parse(readFileSync(join(out, "plan.json"), "utf-8")).tasks.map((task) => [task.type, task.prompt.split(",")[0]]));
   assert.deepEqual(prompts, {
@@ -3537,6 +3750,7 @@ test("with the real compiler, a module, a variant and a function named in letter
     "rename-variant": "Rename the variant `Fermée` of the custom type `État` in `src/Café.elm` to `FerméeRenamed`",
     "rename-module": "Rename the module `Café` to `CaféRenamed`. Move `src/Café.elm` to `src/CaféRenamed.elm`",
     "add-variant": "Add a variant `AddedByBenchmark`",
+    "remove-variant": "Remove the variant `Fermée` from the custom type `État` in `src/Café.elm`. Remove every branch of a `case` whose pattern names `Fermée`",
   });
 
   // The agent takes the two names from the request, and writes the new one wherever the old one stands whole
@@ -3552,9 +3766,78 @@ test("with the real compiler, a module, a variant and a function named in letter
   for (const type of ["rename-function", "rename-variant", "rename-module"]) {
     const ran = await runNode(BENCH, ["run", "--config", config, "--out", out, "--only", type, "--arms", "baseline", "--agent", agent]);
     assert.equal(ran.code, 0, ran.stderr);
-    const { outcome, problems } = JSON.parse(readFileSync(join(out, "runs", `Bistro--${type}--baseline--1.json`), "utf-8"));
+    const { outcome, problems } = JSON.parse(readFileSync(join(out, "runs", `Bistro--${type}--100--baseline--1.json`), "utf-8"));
     assert.deepEqual({ type, outcome, problems }, { type, outcome: "passed", problems: [] });
   }
+});
+
+test("with the real compiler, the plan leaves out a removal that does not compile and a field that a record of a package has", async (t) => {
+  if (!hasElm()) {
+    t.skip("needs elm 0.19.1 on PATH");
+    return;
+  }
+  const repo = tempDir(t);
+  mkdirSync(join(repo, "src"));
+  cpSync(join(REPO, "tests/fixture/elm.json"), join(repo, "elm.json"));
+  writeFileSync(
+    join(repo, "src/Signal.elm"),
+    [
+      "module Signal exposing (Light(..), Page, describe, documentTitle)",
+      "",
+      "import Browser",
+      "",
+      "",
+      "type Light",
+      "    = Walk",
+      "    | Wait",
+      "    | Halt",
+      "",
+      "",
+      "type alias Page =",
+      "    { title : String",
+      "    , id : Int",
+      "    }",
+      "",
+      "",
+      "describe : Light -> String",
+      "describe light =",
+      "    case light of",
+      "        Walk ->",
+      '            "walk"',
+      "",
+      "        Wait ->",
+      '            "wait"',
+      "",
+      "        _ ->",
+      '            "halt"',
+      "",
+      "",
+      "documentTitle : Browser.Document msg -> String",
+      "documentTitle document =",
+      "    document.title",
+      "",
+    ].join("\n")
+  );
+  writeFileSync(
+    join(repo, "src/Main.elm"),
+    'module Main exposing (main)\n\nimport Browser\nimport Html exposing (Html, text)\nimport Signal exposing (Light(..))\n\n\nmain : Html msg\nmain =\n    text (Signal.describe Halt ++ Signal.documentTitle (Browser.Document "t" []))\n'
+  );
+  gitRepository(repo);
+  const config = join(tempDir(t), "config.json");
+  writeFileSync(config, JSON.stringify({ codebases: [{ label: "Lights", repo, check: ["elm", "make", "src/Main.elm", "--output=/dev/null"] }] }));
+  const out = join(tempDir(t), "out");
+  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"]);
+  assert.equal(planned.code, 0, planned.stderr);
+  const { tasks } = JSON.parse(readFileSync(join(out, "plan.json"), "utf-8"));
+  // Halt is used in two files and the others in one, so it is tried first. Without it the catch-all
+  // would match nothing that the branches above it do not, which the compiler rejects.
+  assert.match(tasks.find((task) => task.type === "remove-variant").prompt, /^Remove the variant `Wait` /);
+  // The rename of the field reaches the read of a record of a package, which then does not compile
+  assert.equal(tasks.filter((task) => task.type === "remove-field").length, 0);
+  assert.match(
+    planned.stdout,
+    /^Lights: no suitable target for remove-field\. The project did not compile once the plan had removed the field of the one target that was tried, or renamed it wherever the plan reads a use of it$/m
+  );
 });
 
 test("with the real compiler, a function whose new name an unannotated function has is passed over", async (t) => {
@@ -3591,7 +3874,7 @@ test("with the real compiler, a function whose new name an unannotated function 
   const config = join(tempDir(t), "config.json");
   writeFileSync(config, JSON.stringify({ codebases: [{ label: "Values", repo, check: ["elm", "make", "src/Main.elm", "--output=/dev/null"] }] }));
   const out = join(tempDir(t), "out");
-  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"]);
+  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"]);
   assert.equal(planned.code, 0, planned.stderr);
   // convertValue comes first by its name. Renamed, it would clash with the function that has no annotation.
   const task = JSON.parse(readFileSync(join(out, "plan.json"), "utf-8")).tasks.find((task) => task.type === "rename-function");
@@ -3623,7 +3906,7 @@ test("with the real compiler, a module whose new path holds a file is no target,
   const config = join(tempDir(t), "config.json");
   writeFileSync(config, JSON.stringify({ codebases: [{ label: "Names", repo, check: ["elm", "make", "src/Main.elm", "--output=/dev/null"] }] }));
   const out = join(tempDir(t), "out");
-  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"]);
+  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"]);
   assert.equal(planned.code, 0, planned.stderr);
   const task = JSON.parse(readFileSync(join(out, "plan.json"), "utf-8")).tasks.find((task) => task.type === "rename-module");
   if (ignoresCase) {
@@ -3648,7 +3931,7 @@ test("with the real compiler, a module rename that moves the module over a file 
   const config = join(tempDir(t), "config.json");
   writeFileSync(config, JSON.stringify({ codebases: [{ label: "Lib", repo, check: ["elm", "make", "src/Main.elm", "--output=/dev/null"] }] }));
   const out = join(tempDir(t), "out");
-  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"]);
+  const planned = await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"]);
   assert.equal(planned.code, 0, planned.stderr);
 
   // The sessions start from a commit with a placeholder at the new path, which plan would have seen
@@ -3669,7 +3952,7 @@ test("with the real compiler, a module rename that moves the module over a file 
   );
   const ran = await runNode(BENCH, ["run", "--config", config, "--out", out, "--only", "rename-module", "--arms", "baseline", "--agent", agent]);
   assert.equal(ran.code, 0, ran.stderr);
-  const { outcome, problems } = JSON.parse(readFileSync(join(out, "runs", "Lib--rename-module--baseline--1.json"), "utf-8"));
+  const { outcome, problems } = JSON.parse(readFileSync(join(out, "runs", "Lib--rename-module--100--baseline--1.json"), "utf-8"));
   assert.deepEqual({ outcome, problems }, { outcome: "wrong-result", problems: ["the move of src/Lib.elm wrote over src/LibRenamed.elm, a file of the starting commit"] });
 });
 
@@ -3677,7 +3960,7 @@ test("a run takes a plan only from the state of the benchmark that made it", asy
   const config = join(tempDir(t), "config.json");
   writeFileSync(config, JSON.stringify({ codebases: [{ label: "Fixture", repo: gitRepository(copyFixture(t)), check: [process.execPath, FAKE_COMPILER, "src/Main.elm"] }] }));
   const out = join(tempDir(t), "out");
-  assert.equal((await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1"])).code, 0);
+  assert.equal((await runNode(BENCH, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"])).code, 0);
 
   // What a task expects is written into the plan, and another state of the code may check other things
   const path = join(out, "plan.json");
@@ -3740,7 +4023,7 @@ test("a run is held to the recorded language server only while sessions of the l
   const { root, binary, bench, config, out } = await plannedCopy(t);
   const held = { model: "claude-opus-5-5", maxBudgetUsd: 5, timeoutMin: 20, benchmark: stateOfSources(root, BENCHMARK_SOURCES), languageServer: "the recorded server", agent: "an agent that names no version", arms: ["lsp"] };
   mkdirSync(join(out, "runs"));
-  const lspRecord = join(out, "runs/Fixture--rename-function--lsp--1.json");
+  const lspRecord = join(out, "runs/Fixture--rename-function--100--lsp--1.json");
   writeFileSync(lspRecord, JSON.stringify({ arm: "lsp", languageServer: held.languageServer }));
   writeFileSync(join(out, "run.json"), JSON.stringify(held));
   const command = ["run", "--config", config, "--out", out, "--only", "rename-function", "--agent", join(out, "missing-agent")];
@@ -3759,7 +4042,7 @@ test("a run is held to the recorded language server only while sessions of the l
     assert.deepEqual(JSON.parse(readFileSync(join(out, "run.json"), "utf-8")), held);
   }
   // No work remains in either arm, so the server is not needed then either.
-  writeFileSync(join(out, "runs/Fixture--rename-function--baseline--1.json"), JSON.stringify({ arm: "baseline" }));
+  writeFileSync(join(out, "runs/Fixture--rename-function--100--baseline--1.json"), JSON.stringify({ arm: "baseline" }));
   assert.equal((await runNode(bench, command)).code, 0);
   // A later lsp session is still held to the server of the recorded ones.
   const later = await runNode(bench, [...command, "--repeat", "2"]);
@@ -3966,7 +4249,7 @@ async function plannedCopy(t) {
   const config = join(tempDir(t), "config.json");
   writeFileSync(config, JSON.stringify({ codebases: [{ label: "Fixture", repo: gitRepository(copyFixture(t)), check: [process.execPath, FAKE_COMPILER, "src/Main.elm"] }] }));
   const out = join(tempDir(t), "out");
-  assert.equal((await runNode(bench, ["plan", "--config", config, "--out", out, "--min-files", "1"])).code, 0);
+  assert.equal((await runNode(bench, ["plan", "--config", config, "--out", out, "--min-files", "1", "--levels", "100"])).code, 0);
   return { ...copy, config, out };
 }
 
@@ -3977,7 +4260,7 @@ test("a resumed run is held to the language server's version and sources, and no
       env: { ...process.env, FAKE_AGENT: "solve" },
     });
   const run = (...more) => runIn(out, ...more);
-  const recorded = (repetition) => JSON.parse(readFileSync(join(out, "runs", `Fixture--rename-function--lsp--${repetition}.json`), "utf-8")).languageServer;
+  const recorded = (repetition) => JSON.parse(readFileSync(join(out, "runs", `Fixture--rename-function--100--lsp--${repetition}.json`), "utf-8")).languageServer;
 
   const first = await run();
   assert.equal(first.code, 0, first.stderr);
@@ -4083,12 +4366,212 @@ await import(${JSON.stringify(FAKE_AGENT)});
   const before = await runChanging(changes[0][0], "lsp,baseline", inBaseline);
   assert.equal(before.ran.code, 1, before.ran.stderr);
   assert.match(before.ran.stderr, /^The language server was .* A session of the lsp arm would run another server than its record names\. /m);
-  assert.deepEqual(before.files, ["jsonl", "json", "patch"].map((ending) => `Fixture--rename-function--baseline--1.${ending}`).sort());
+  assert.deepEqual(before.files, ["jsonl", "json", "patch"].map((ending) => `Fixture--rename-function--100--baseline--1.${ending}`).sort());
   // A session of the baseline starts no server. A run of the baseline alone goes on while the checkout changes.
   const { ran, files } = await runChanging(changes[0][0], "baseline");
   assert.equal(ran.code, 0, ran.stderr);
   assert.deepEqual(
     files.filter((file) => file.endsWith(".json")),
-    ["Fixture--rename-function--baseline--1.json", "Fixture--rename-function--baseline--2.json"]
+    ["Fixture--rename-function--100--baseline--1.json", "Fixture--rename-function--100--baseline--2.json"]
   );
+});
+
+// Records as bench.mjs writes and reads them, for a test that calls the probe without the command line
+const probeFiles = {
+  readJson: (path) => JSON.parse(readFileSync(path, "utf-8")),
+  writeJson: (path, value) => writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`),
+};
+
+test("the probe judges each tool call as a session, tells a refusal from an error and puts the checkout back after each target", async (t) => {
+  const repo = gitRepository(copyFixture(t));
+  const out = tempDir(t);
+  const config = join(tempDir(t), "config.json");
+  writeFileSync(config, JSON.stringify({ codebases: [{ label: "Fixture", repo, check: [process.execPath, FAKE_COMPILER, "src/Main.elm", "./src/FieldRename.elm", "src/TestRemoveVariant.elm"] }] }));
+  const [codebase] = loadConfig(config).codebases;
+
+  // Stands in for the tools. Each call notes whether it found the checkout as the commit has it.
+  const found = [];
+  const edit = (path, change) => writeFileSync(path, change(readFileSync(path, "utf-8")));
+  const everywhere = (root, from, to) => {
+    for (const file of readdirSync(join(root, "src"))) edit(join(root, "src", file), (text) => text.replace(new RegExp(`\\b${from}\\b`, "g"), to));
+  };
+  const call = async (name, args) => {
+    const root = dirname(dirname(args.file_path));
+    found.push(git(root, "status", "--porcelain", "--untracked-files=all"));
+    if (name === "elm_rename_function" && args.old_name === "defaultUser") everywhere(root, args.old_name, args.newName);
+    else if (name === "elm_rename_function" && args.old_name === "formatName") {
+      // The rename, and a string that it had no business with
+      everywhere(root, args.old_name, args.newName);
+      edit(join(root, "src/Utils.elm"), (text) => text.replace('"Hello, "', '"Hi, "'));
+    } else if (name === "elm_rename_function") throw new ToolError(`Error: Cannot rename greet to ${args.newName}: at src/Utils.elm:3 a local ${args.newName} would shadow the renamed function, which Elm does not allow. No file was changed`);
+    else if (name === "elm_rename_field") edit(args.file_path, (text) => text.replace("name : String", "nameRenamed : String -- BROKEN"));
+    else if (name === "elm_rename_file" && args.file_path.endsWith("Utils.elm")) {
+      everywhere(root, "Utils", "UtilsRenamed");
+      renameSync(args.file_path, join(root, "src", args.new_name));
+    } else if (name === "elm_rename_file") {
+      // Half a change, and then the server is gone
+      edit(args.file_path, (text) => text.replace("module Types", "module TypesRenamed"));
+      throw new ToolError("Request workspace/executeCommand timed out");
+    } else if (name === "elm_add_variant") return "Successfully: Added variant";
+    else if (name === "elm_rename_type") everywhere(root, args.old_name, args.newName);
+    else if (name === "elm_move_function" && args.function_name === "greet") throw new ToolError("Moving greet would create an import cycle");
+    return `${name} done`;
+  };
+  const settings = { out, minFiles: 1, perType: 30, only: "", languageServer: "the test's", assertServer: () => {}, ...probeFiles, call };
+  const records = await probeCodebase(codebase, settings);
+  const outcomes = Object.fromEntries(records.map(({ type, key, outcome, unmet }) => [`${type} ${key}`, [outcome, ...unmet]]));
+  assert.deepEqual(outcomes, {
+    "rename-function src/Types.elm:defaultUser": ["solved"],
+    "rename-function src/Utils.elm:formatName": ["wrong-result", "renames-only"],
+    "rename-function src/Utils.elm:greet": ["tool-refused"],
+    "rename-field src/Types.elm:User.name": ["does-not-compile"],
+    "rename-module src/Utils.elm": ["solved"],
+    "rename-module src/Types.elm": ["tool-error"],
+    // The stand-in compiler breaks with the variant added to either type
+    "add-variant src/TestRemoveVariant.elm:Color": ["wrong-result", "type-has-variant", "adds-variant-and-branches"],
+    "add-variant src/TestRemoveVariant.elm:Message": ["wrong-result", "type-has-variant", "adds-variant-and-branches"],
+    "rename-type src/Types.elm:User": ["solved"],
+    // A move that changed nothing, and one that the tool refused
+    "move-function src/Types.elm:defaultUser": ["wrong-result", "declares-function", "lacks-function"],
+    "move-function src/Utils.elm:formatName": ["wrong-result", "declares-function", "lacks-function"],
+    "move-function src/Utils.elm:greet": ["tool-refused"],
+    // Tools that change nothing leave every variant and field where it was
+    ...Object.fromEntries(
+      [
+        "remove-variant src/Main.elm:Msg.Decrement",
+        "remove-variant src/Main.elm:Msg.Increment",
+        "remove-variant src/TestRemoveVariant.elm:Color.Blue",
+        "remove-variant src/TestRemoveVariant.elm:Color.Green",
+        "remove-variant src/TestRemoveVariant.elm:Color.Unused",
+        "remove-variant src/TestRemoveVariant.elm:Message.ImageMsg",
+        "remove-variant src/TestRemoveVariant.elm:Message.SystemMsg",
+        "remove-variant src/TestRemoveVariant.elm:Message.TextMsg",
+        "remove-variant src/TestRemoveVariant.elm:Status.Active",
+        "remove-variant src/TestRemoveVariant.elm:Status.Inactive",
+      ].map((key) => [key, ["wrong-result", "type-lacks-variant", "removes-only"]])
+    ),
+    "remove-field src/Main.elm:Model.count": ["wrong-result", "alias-lacks-field", "removes-only"],
+    "remove-field src/Main.elm:Model.user": ["wrong-result", "alias-lacks-field", "removes-only"],
+  });
+  // Every call found the checkout as the commit has it, after a change, a broken build, a move and half a change
+  const twoCalls = records.filter((record) => ["add-variant", "remove-variant", "remove-field"].includes(record.type)).length;
+  assert.equal(found.length, records.length + twoCalls, "add-variant and the removals make two calls each");
+  assert.deepEqual(new Set(found), new Set([""]));
+  // The tool's own words are kept, with what it changed
+  const [refused, failed] = ["greet", "src/Types.elm"].map((end) => records.find((record) => record.key.endsWith(end) && record.outcome.startsWith("tool")));
+  assert.match(refused.text, /^Error: Cannot rename greet to greetRenamed: at src\/Utils\.elm:3 a local greetRenamed would shadow/);
+  assert.deepEqual([refused.diff, refused.checkSeconds], [{ files: 0, added: 0, removed: 0 }, null]);
+  assert.equal(failed.text, "Request workspace/executeCommand timed out");
+  assert.deepEqual(failed.diff, { files: 1, added: 1, removed: 1 });
+  const wrong = records.find((record) => record.outcome === "wrong-result" && record.type === "rename-function");
+  assert.match(wrong.problems[0], /src\/Utils\.elm changed in more than the name: "Hello, " became "Hi, "/);
+  assert.equal(typeof wrong.checkSeconds, "number");
+  // The records and the patches are in the output directory, the checkout is gone and the repository as it was
+  const written = JSON.parse(readFileSync(join(out, "probe", "Fixture.json"), "utf-8"));
+  assert.deepEqual(written.records, records);
+  assert.equal(written.commit, git(repo, "rev-parse", "HEAD").trim());
+  assert.equal(readdirSync(join(out, "probe", "Fixture")).length, records.length - 2, "a refusal changed nothing, and leaves no patch");
+  assert.deepEqual(readdirSync(join(out, "work")), []);
+  assert.equal(worktreesOf(repo), 1);
+  assert.equal(git(repo, "status", "--porcelain"), "");
+
+  // Started again after the repository moved on, it stays on the commit of its records and calls no
+  // tool for a target that has its record
+  writeFileSync(join(repo, "src/Later.elm"), "module Later exposing (later)\n\n\nlater : Int\nlater =\n    1\n");
+  git(repo, "add", "-A");
+  git(repo, "commit", "--quiet", "--message", "later");
+  const again = await probeCodebase(codebase, { ...settings, call: () => assert.fail("a target with a record was probed again") });
+  assert.deepEqual(again, records);
+  assert.equal(JSON.parse(readFileSync(join(out, "probe", "Fixture.json"), "utf-8")).commit, written.commit);
+  // Records made under other settings would be counted with the new ones
+  await assert.rejects(
+    probeCodebase(codebase, { ...settings, minFiles: 2 }),
+    /Fixture\.json holds records that were made differently: --min-files was 1 and is now 2\. Probe as before, or use another --out\./
+  );
+  await assert.rejects(probeCodebase(codebase, { ...settings, languageServer: "another" }), /the language server was "the test's" and is now "another"/);
+});
+
+test("the probe drives the real language server, and tells a rename that it got right from one that it got wrong", async (t) => {
+  // The language server leaves the snapshots and migrations of Lamdera under src/Evergreen as they are, so a
+  // module rename keeps an import of the module there. The stand-in compiler takes the result and the verdict
+  // does not. The name of the module in elm.json changes, and in a string it stays, both as the verdict wants.
+  const repo = tempDir(t);
+  mkdirSync(join(repo, "src/Shop"), { recursive: true });
+  mkdirSync(join(repo, "src/Evergreen/Migrate"), { recursive: true });
+  writeFileSync(join(repo, "src/Evergreen/Migrate/V2.elm"), "module Evergreen.Migrate.V2 exposing (version)\n\nimport Shop.Units\n\n\nversion : Int\nversion =\n    2\n");
+  const elmJson = JSON.parse(readFileSync(join(REPO, "tests/fixture/elm.json"), "utf-8"));
+  writeFileSync(join(repo, "elm.json"), JSON.stringify({ ...elmJson, "exposed-modules": ["Shop.Units"] }));
+  writeFileSync(join(repo, "src/Shop/Units.elm"), "module Shop.Units exposing (Weight, grams)\n\n\ntype alias Weight =\n    Int\n\n\ngrams : Int -> Weight\ngrams amount =\n    amount\n");
+  writeFileSync(
+    join(repo, "src/Main.elm"),
+    'module Main exposing (main)\n\nimport Html exposing (Html, text)\nimport Shop.Units\n\n\nweightType : String\nweightType =\n    "Shop.Units.Weight"\n\n\nmain : Html msg\nmain =\n    text (weightType ++ String.fromInt (Shop.Units.grams 5))\n'
+  );
+  gitRepository(repo);
+  const config = join(tempDir(t), "config.json");
+  writeFileSync(config, JSON.stringify({ codebases: [{ label: "Shop", repo, check: [process.execPath, FAKE_COMPILER, "src/Main.elm", "src/Evergreen/Migrate/V2.elm"] }] }));
+  const out = join(tempDir(t), "out");
+  // The migration would take the function in a move, which is not what this test is about
+  const probe = () => runNode(BENCH, ["probe", "--config", config, "--out", out, "--min-files", "1", "--only", "rename"]);
+
+  const probed = await probe();
+  assert.equal(probed.code, 0, probed.stderr);
+  const { records } = JSON.parse(readFileSync(join(out, "probe", "Shop.json"), "utf-8"));
+  assert.deepEqual(
+    records.map(({ type, key, outcome, unmet }) => [type, key, outcome, unmet]),
+    [
+      ["rename-function", "src/Shop/Units.elm:grams", "solved", []],
+      ["rename-module", "src/Shop/Units.elm", "wrong-result", ["no-import-of"]],
+    ]
+  );
+  assert.match(records[0].text, /^Renamed function "grams" to "gramsRenamed"/);
+  assert.deepEqual(records[1].problems, ["Shop.Units is still imported by src/Evergreen/Migrate/V2.elm"]);
+  const patches = readdirSync(join(out, "probe", "Shop")).map((name) => readFileSync(join(out, "probe", "Shop", name), "utf-8"));
+  assert.ok(patches.some((patch) => patch.includes('+{"type":"application",') && patch.includes('"exposed-modules":["Shop.UnitsRenamed"]}')), patches.join("\n"));
+  // A line per task type on stderr, and counts on stdout and in probe.json, which name nothing of the codebase
+  assert.match(probed.stderr, /^Shop: rename-function, 1 of 1 target: 1 solved, in \d+ s$/m);
+  assert.match(probed.stderr, /^Shop: rename-module, 1 of 1 target: 1 wrong-result, in \d+ s$/m);
+  assert.match(probed.stdout, /^Shop +rename-module +all +1 +0 +1 +0 +0 +0$/m);
+  const summary = readFileSync(join(out, "probe.json"), "utf-8");
+  assert.doesNotMatch(summary + probed.stdout, /Units|grams|Weight/);
+  assert.equal(worktreesOf(repo), 1);
+  assert.equal(git(repo, "status", "--porcelain"), "");
+
+  // Given again, the command finds every target recorded and writes the same counts
+  const recordsBefore = readFileSync(join(out, "probe", "Shop.json"), "utf-8");
+  const again = await probe();
+  assert.equal(again.code, 0, again.stderr);
+  assert.equal(again.stdout, probed.stdout);
+  assert.equal(readFileSync(join(out, "probe", "Shop.json"), "utf-8"), recordsBefore);
+  // A text that names no task type is a mistake
+  const none = await runNode(BENCH, ["probe", "--config", config, "--out", out, "--only", "rename-nothing"]);
+  assert.equal(none.code, 1);
+  assert.match(none.stderr, /^No task type of the config's codebases has "rename-nothing" in its id\./);
+});
+
+test("Ctrl-C in the middle of a probe keeps the records of the targets that finished, and the same command does the rest", async (t) => {
+  const repo = gitRepository(copyFixture(t));
+  const config = join(tempDir(t), "config.json");
+  writeFileSync(config, JSON.stringify({ codebases: [{ label: "Fixture", repo, check: [process.execPath, FAKE_COMPILER, "src/Main.elm", "./src/FieldRename.elm", "src/TestRemoveVariant.elm"] }] }));
+  const out = join(tempDir(t), "out");
+  const args = [BENCH, "probe", "--config", config, "--out", out, "--min-files", "1"];
+  // Each build takes a while, so the probe is still at work when the first task type is done
+  const probing = spawn(process.execPath, args, { env: { ...process.env, FAKE_COMPILER_DELAY_MS: "300" }, stdio: ["ignore", "ignore", "pipe"] });
+  let stderr = "";
+  probing.stderr.on("data", (chunk) => (stderr += chunk));
+  for (let waited = 0; !/rename-function, 3 of 3 targets/.test(stderr) && waited < 30000; waited += 50) await sleep(50);
+  probing.kill("SIGINT");
+  const [code] = await once(probing, "close");
+  assert.equal(code, 130, stderr);
+  assert.match(stderr, /^Interrupted\. Whatever was running has been ended\. Finished targets keep their records, and the same command picks up from there\.$/m);
+  const kept = JSON.parse(readFileSync(join(out, "probe", "Fixture.json"), "utf-8")).records;
+  assert.ok(kept.length >= 3 && kept.length < 24, `${kept.length} records`);
+  assert.equal(existsSync(join(out, "lock")), false);
+  assert.deepEqual(readdirSync(join(out, "work")), []);
+  assert.equal(worktreesOf(repo), 1);
+
+  const resumed = await runNode(BENCH, args.slice(1));
+  assert.equal(resumed.code, 0, resumed.stderr);
+  const records = JSON.parse(readFileSync(join(out, "probe", "Fixture.json"), "utf-8")).records;
+  assert.deepEqual(records.slice(0, kept.length), kept);
+  assert.equal(records.length, 24);
 });
