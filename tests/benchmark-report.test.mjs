@@ -82,6 +82,8 @@ test("the summary counts and takes medians per arm, and leaves the codebase's na
   const html = renderReport(summary);
   assert.match(html, /6 sessions in total\..*1 more session left out: the other arm has not done the same round of the same task yet\./);
   assert.match(html, /Ended without reporting a cost, and left out of the cost medians: 1 session without language server\./);
+  // The heads of the levels' table, as they were before there was a choice of harness
+  assert.match(html, /<th class="number">Median cost<\/th><th class="number">Median time<\/th><th class="number">Median tool calls<\/th>/);
   // How the sessions of each arm ended, one column per ending
   assert.match(html, /Without language server<\/td>(<td class="number">\d<\/td>){7}<\/tr>/);
   assert.match(html, /Without language server<\/td><td class="number">1<\/td><td class="number">0<\/td><td class="number">1<\/td><td class="number">1<\/td>/);
@@ -147,6 +149,9 @@ test("the report states the headline figures and lists every session", () => {
   );
   assert.match(failed, /<td>Out of budget<\/td>/);
   assert.match(failed, /<td>Session error<\/td>/);
+  // Claude Code is held by its budget and its time, and counts no tokens as a session goes
+  assert.match(failed, / "Out of time" and "Out of budget" are the limits the benchmark was run with\. /);
+  assert.match(failed, /<th class="number">Out of time<\/th><th class="number">Out of budget<\/th><th class="number">Session error<\/th>/);
 
   // Sessions of several minutes get a time axis in minutes, like the labels at their bars
   const long = renderReport(summarize(plan, [record("baseline", "passed", 1, 300000), record("lsp", "passed", 1, 200000)]));

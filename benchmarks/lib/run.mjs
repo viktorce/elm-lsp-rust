@@ -4,22 +4,26 @@
 
 import { rmSync, writeFileSync } from "fs";
 import { join } from "path";
-import { agentName, runAgent } from "./agent.mjs";
+import { runAgent } from "./agent.mjs";
 import { scanProject } from "./elm-source.mjs";
+import { resumesAt, TOO_MUCH } from "./harness.mjs";
 import { Interrupted, isStopped } from "./process.mjs";
 import {
   changedFiles,
   closeCheckout,
+  closeHome,
   committedFiles,
   filesOutside,
   isOnItsCommit,
   openCheckout,
+  openHome,
   originalsOf,
   patchOf,
   realRootOf,
   realTopOf,
   runCheck,
   stateOf,
+  takeAway,
 } from "./sandbox.mjs";
 import { unmetExpectations } from "./tasks.mjs";
 
@@ -40,19 +44,16 @@ function outcomeOf(arm, agent, compiles, problems) {
 }
 
 /**
- * Why a session counts as agent-failed. The first two are limits the
- * operator set, and say something about the arm. The third is everything
+ * Why a session counts as agent-failed. The first three are limits the
+ * operator set, and say something about the arm. The fourth is everything
  * else, a request that grew too long for the model for one, and says little.
- * @returns {"time-limit" | "budget-limit" | "error"}
+ * @returns {"time-limit" | "budget-limit" | "token-limit" | "error"}
  */
 function failureOf(agent) {
   if (agent.timedOut) return "time-limit";
+  if (agent.stopReason === "token-limit") return "token-limit";
   return /budget/.test(agent.stopReason) ? "budget-limit" : "error";
 }
-
-// What the API, and Claude Code in its place, say of a request that holds more than the model
-// takes. A session that ends on that has itself to thank.
-const TOO_MUCH = /(prompt|input) is too long|request too large|request_too_large|context (window|length|limit)/i;
 
 /**
  * True when a session ended on trouble between here and the API: a rate
@@ -74,13 +75,14 @@ function lastWords(agent) {
 export const runId = (task, arm, repetition) => `${task.id.replaceAll("/", "--")}--${arm}--${repetition}`;
 
 // A session that is set up differently from what its arm means measures nothing. Null when it is as it should be.
-// `version` is the version of Claude Code that the run began with, where the caller holds its sessions to one.
-function wrongSetup(arm, agent, version) {
-  if (agent.memoryOff === false) return "it loaded Claude Code's auto memory, which every session on this repository shares";
-  // Claude Code can update itself while a run is under way, and another version is another agent. A session
+// `version` is the version of the harness that the run began with, where the caller holds its sessions to one.
+// `ended` says that the session is over, and that what is not known of its setup by now will never be.
+function wrongSetup(harness, arm, agent, version, ended = false) {
+  if (agent.memoryOff === false) return `it loaded ${harness.name}'s auto memory, which every session on this repository shares`;
+  // A harness can update itself while a run is under way, and another version is another agent. A session
   // that has not come to its first event has reported nothing yet.
   if (version !== undefined && agent.memoryOff !== null && agent.agentVersion !== version) {
-    return `it ran in ${agentName(agent.agentVersion)}, and this run began with ${agentName(version)}`;
+    return `it ran in ${harness.agentName(agent.agentVersion)}, and this run began with ${harness.agentName(version)}`;
   }
   if (arm !== "lsp" && agent.lspStatus !== null && agent.lspStatus !== "absent") return "it had the language server";
   if (agent.strayTools?.length > 0) return `it had tools that its arm is not given: ${agent.strayTools.join(", ")}`;
@@ -89,9 +91,16 @@ function wrongSetup(arm, agent, version) {
   if (arm === "lsp" && agent.lspStatus === "absent") return "it was not given the language server";
   // Without its tools the arm is the baseline under another name
   if (arm === "lsp" && agent.lspStatus === "connected" && agent.lspTools === 0) return "its language server was connected and handed it no tool";
+  // The model would first have to go looking for the tools that the other harnesses hand it
+  if (arm === "lsp" && agent.lspStatus === "deferred") return `${harness.name} named the language server and deferred its tools, so the prompt held none of them`;
   // Neither there nor failed, "pending" for one: whether the session went on to have the tools cannot be told
   if (arm === "lsp" && agent.lspStatus !== null && !["connected", "failed"].includes(agent.lspStatus)) {
     return `its language server was "${agent.lspStatus}" when it began`;
+  }
+  // The model worked, and the harness never said what the session was given: neither its tools nor whether it had the
+  // language server. A session that never got an answer is no result anyway.
+  if (ended && agent.strayTools === null && agent.replies > 0) {
+    return `${harness.name} did not say what it gave the session, so whether it had the tools of its arm and nothing else cannot be told`;
   }
   return null;
 }
@@ -144,7 +153,7 @@ export async function judge(worktree, codebase, task, before) {
  * Execute one run and return its record. The agent's transcript and its
  * changes as a patch are written next to it. Those two and the record's
  * `problems` name files and symbols of the codebase. Of the rest, `commit`
- * is the codebase's own, and `failureText` holds Claude Code's words about a
+ * is the codebase's own, and `failureText` holds the harness's words about a
  * session that failed, which can name a path. The report takes neither.
  *
  * Throws when the run measured nothing: the starting point does not compile,
@@ -153,16 +162,38 @@ export async function judge(worktree, codebase, task, before) {
  * no file behind.
  */
 export async function executeRun({ task, codebase, arm, repetition, options, afterSession = () => {} }) {
+  const { harness } = options;
   const id = runId(task, arm, repetition);
   const transcriptPath = join(options.runsDir, `${id}.jsonl`);
   const patchPath = join(options.runsDir, `${id}.patch`);
   const slot = join(options.workDir, id);
   const worktree = await openCheckout(codebase, slot);
   try {
+    // What of the commit the harness hands every session whatever it is started with goes before the check
+    // or the session sees the checkout, in both arms alike
+    const handed = harness.handedOn?.(worktree.elmRoot, worktree.dir) ?? [];
+    const named = handed.length > 1 ? `${handed.slice(0, -1).join(", ")} and ${handed.at(-1)}` : handed[0];
+    if (handed.length > 0) {
+      const refused = await takeAway(worktree, handed);
+      if (refused) {
+        throw new Error(
+          `${codebase.label}: ${harness.name} hands ${named} to every session, whatever it is started with, and the benchmark takes only files of the commit out of a checkout. ` +
+            `Here ${refused}. Run this codebase in another harness, or commit what the path holds.`
+        );
+      }
+      options.tell?.(codebase.label, `${codebase.label}: ${harness.name} hands ${named} to every session, whatever it is started with, so the benchmark takes ${handed.length === 1 ? "it" : "them"} out of the checkout of every session of both arms.`);
+    }
     // Builds the compiler's cache, so no arm pays for a cold build, and proves the starting point is sound
     const start = await runCheck(worktree, codebase);
     if (!start.ok) {
-      throw new Error(`${codebase.label}: before the agent starts, ${start.problem}`);
+      const without = handed.length > 0 ? ` without ${named}, which the benchmark takes out for ${harness.name},` : "";
+      throw new Error(`${codebase.label}: before the agent starts,${without} ${start.problem}`);
+    }
+    // Written before the state is taken, so that it is none of the session's changes
+    try {
+      harness.prepareCheckout?.(worktree.elmRoot, arm, harness.tools);
+    } catch (error) {
+      throw new Error(`${codebase.label}: ${error.message}`);
     }
     // What a build generates is not the agent's doing
     const before = await stateOf(worktree, codebase);
@@ -173,6 +204,7 @@ export async function executeRun({ task, codebase, arm, repetition, options, aft
     }
 
     const agent = await runAgent({
+      harness,
       command: options.agentCommand,
       cwd: worktree.elmRoot,
       prompt: task.prompt,
@@ -180,13 +212,15 @@ export async function executeRun({ task, codebase, arm, repetition, options, aft
       effort: options.effort,
       arm,
       maxBudgetUsd: options.maxBudgetUsd,
+      maxTokens: options.maxTokens,
       timeoutMs: options.timeoutMs,
       transcriptPath,
+      home: openHome(slot),
       // Such a session measures nothing, and every turn of it would still be paid for
-      stopIf: (session) => wrongSetup(arm, session, options.agentVersion) !== null,
+      stopIf: (session) => wrongSetup(harness, arm, session, options.agentVersion) !== null,
     });
     afterSession();
-    const setup = wrongSetup(arm, agent, options.agentVersion);
+    const setup = wrongSetup(harness, arm, agent, options.agentVersion, true);
     if (setup) {
       throw new Error(`${id}: the session was not set up as its arm requires: ${setup}`);
     }
@@ -202,7 +236,10 @@ export async function executeRun({ task, codebase, arm, repetition, options, aft
           : waitedOut
             ? "was still waiting for the API when its time was up"
             : "lost the API in the middle of its work";
-      throw new Error(`${id}: the session ${how} (${lastWords(agent)}). Nothing was recorded for it.`);
+      // A limit of a subscription resets after hours, and the harness may say when
+      const resumes = resumesAt(agent.failureText);
+      const later = resumes ? ` ${harness.name} said that it can go on ${resumes}, and the same command goes on from here.` : "";
+      throw new Error(`${id}: the session ${how} (${lastWords(agent)}). Nothing was recorded for it.${later}`);
     }
 
     const { compiles, problems, changedFiles: changedCount, patch } = await judge(worktree, codebase, task, before);
@@ -220,8 +257,9 @@ export async function executeRun({ task, codebase, arm, repetition, options, aft
       files: task.files,
       arm,
       repetition,
+      harness: harness.id,
       model: options.model,
-      // Null where the run named none, and the session ran at the default of Claude Code for its model
+      // Null where the run named none, and the session ran at the default of its harness for its model
       effort: options.effort ?? null,
       languageServer: options.languageServer,
       concurrency: options.concurrency,
@@ -236,6 +274,7 @@ export async function executeRun({ task, codebase, arm, repetition, options, aft
     throw error;
   } finally {
     try {
+      closeHome(slot);
       await closeCheckout(codebase, slot);
     } catch (error) {
       // The next run of this session removes what is left. The record is worth more than a clean directory.

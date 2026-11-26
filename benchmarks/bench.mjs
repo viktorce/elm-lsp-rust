@@ -8,7 +8,8 @@ import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync,
 import { join, resolve } from "path";
 import { runChecks } from "../mcp-wrapper/doctor.mjs";
 import { RUST_LSP_PATH } from "../mcp-wrapper/lsp-client.mjs";
-import { agentName, ARMS, assertMcpServer, benchmarkVersion, EFFORT_LEVELS, languageServerBuilt, languageServerVersion, serverBuild } from "./lib/agent.mjs";
+import { ARMS, assertMcpServer, benchmarkVersion, languageServerBuilt, languageServerVersion, serverBuild } from "./lib/agent.mjs";
+import { DEFAULT_HARNESS, harnessIdOf, harnessOf, HARNESSES } from "./lib/harnesses/index.mjs";
 import { loadConfig } from "./lib/config.mjs";
 import { widenCheck } from "./lib/entries.mjs";
 import { assertIsolated } from "./lib/isolation.mjs";
@@ -37,16 +38,20 @@ Options
   --levels <list>        Files a target should involve, one target per level (plan, default ${DEFAULT_LEVELS.join(",")}),
                          or the levels whose tasks to run (run, default every level of the plan)
   --per-type <n>         Targets per task type and codebase, spread over their sizes, or all (probe, default 30)
-  --model <id>           Model for every session (run, default claude-opus-5-5)
-  --effort <level>       Effort of every session: ${EFFORT_LEVELS.join(", ")} (run, default Claude Code's for the model)
+  --harness <name>       Harness that runs every session: ${Object.keys(HARNESSES).join(", ")} (run, default ${DEFAULT_HARNESS.id})
+  --model <id>           Model for every session (run, default ${DEFAULT_HARNESS.defaultModel} in ${DEFAULT_HARNESS.name},
+                         required in the others)
+  --effort <level>       Effort of every session, one that the harness takes, ${DEFAULT_HARNESS.efforts.join(", ")} in
+                         ${DEFAULT_HARNESS.name} (run, default the harness's own for the model)
   --arms <list>          Arms to run (run, default ${Object.keys(ARMS).join(",")})
   --repeat <n>           Sessions per task and arm (run, default 1)
   --concurrency <n>      Sessions running at the same time (run, default 1)
   --only <text>          Only tasks whose id contains this text (run), or task types whose
                          <label>/<type> does (probe)
-  --max-budget-usd <n>   Spending limit per session (run, default 5)
+  --max-budget-usd <n>   Spending limit per session, where the harness reports a cost (run, default 5)
+  --max-tokens <n>       Limit of tokens per session, where the harness counts them as a session goes (run, default none)
   --timeout-min <n>      Time limit per session (run, default 20)
-  --agent <path>         Claude Code executable (run, default claude)
+  --agent <path>         The harness's executable (run, default ${Object.values(HARNESSES).map((harness) => harness.executable).join(", ")})
 
 A run that stops, or is stopped with Ctrl-C, goes on from its last finished
 session when the same command is given again. So does a probe, from its last
@@ -334,11 +339,14 @@ function unfitServer() {
 
 // What every session of an output directory must have in common to be compared, as the operator named it
 const SHARED = {
+  harness: "--harness",
   model: "--model",
   effort: "--effort",
   maxBudgetUsd: "--max-budget-usd",
+  maxTokens: "--max-tokens",
   timeoutMin: "--timeout-min",
   languageServer: "the language server",
+  serverSettings: "the settings of the language server",
   benchmark: "the benchmark's own code",
   // Not the operator's to name: the first session of a run says what it is
   agent: "the agent",
@@ -359,18 +367,23 @@ const SHARED = {
 function keepSettings(out, runsDir, shared, arms) {
   const path = join(out, "run.json");
   const before = existsSync(path) && hasRecords(runsDir) ? readJson(path) : null;
+  // A run.json of the time before the choice of a harness holds none, and its sessions ran in Claude Code
+  const recorded = (key) => (key === "harness" ? harnessIdOf(before[key]) : (before[key] ?? null));
   const hold = (settings) => {
     // A setting that run.json does not hold is one that was not set, as an effort is where --effort was not given
-    const changed = Object.keys(settings).filter((key) => before && (before[key] ?? null) !== (settings[key] ?? null));
+    const changed = Object.keys(settings).filter((key) => before && recorded(key) !== (settings[key] ?? null));
     if (changed.length > 0) {
-      const shown = (value) => value ?? "Claude Code's default";
-      const differences = changed.map((key) => `${SHARED[key]} was ${shown(before[key])} and is now ${shown(settings[key])}`).join(", ");
+      // An effort that was not set is the default of the harness of those sessions. A limit that was not set is none.
+      const shown = (key, value, harness) => value ?? (key === "effort" ? `${harnessOf(harness)?.name ?? harness}'s default` : "none");
+      const differences = changed
+        .map((key) => `${SHARED[key]} was ${shown(key, recorded(key), recorded("harness"))} and is now ${shown(key, settings[key], shared.harness)}`)
+        .join(", ");
       throw new Error(`${runsDir} holds records of sessions that ran differently: ${differences}. Run as before, or use another --out.`);
     }
   };
   // A server that no recorded session of the lsp arm ran with is none to hold a run to. The arm is read
   // from the records and not from their names, which hold the label of a codebase, and a label can hold "--lsp--".
-  const { languageServer, ...withoutServer } = shared;
+  const { languageServer, serverSettings, ...withoutServer } = shared;
   hold(readRecords(runsDir).some((record) => record.arm === "lsp") ? shared : withoutServer);
   // Every arm that sessions were ever started for. The report waits for each of them before it counts a round.
   const asked = Object.keys(ARMS).filter((arm) => arms.includes(arm) || before?.arms?.includes(arm));
@@ -388,30 +401,58 @@ async function run(options) {
   for (const arm of arms) {
     if (!ARMS[arm]) throw new UsageError(`Unknown arm "${arm}". Known: ${Object.keys(ARMS).join(", ")}`);
   }
-  // Without one, a session runs at the effort that Claude Code picks for its model
+  const harness = HARNESSES[options.harness ?? DEFAULT_HARNESS.id];
+  if (!harness) throw new UsageError(`Unknown harness "${options.harness}". Known: ${Object.keys(HARNESSES).join(", ")}`);
+  const model = options.model ?? harness.defaultModel;
+  if (!model) throw new UsageError(`--model is required with --harness ${harness.id}. Name the model as ${harness.executable} takes it.`);
+  // Without one, a session runs at the effort that its harness picks for its model
   const effort = options.effort ?? null;
-  if (effort !== null && !EFFORT_LEVELS.includes(effort)) {
-    throw new UsageError(`Unknown effort "${effort}". Known: ${EFFORT_LEVELS.join(", ")}`);
+  if (effort !== null && harness.efforts.length === 0) {
+    throw new UsageError(`${harness.name} has no setting of effort, so --effort cannot be given with --harness ${harness.id}. Leave it out.`);
+  }
+  if (effort !== null && !harness.efforts.includes(effort)) {
+    throw new UsageError(`Unknown effort "${effort}". Known: ${harness.efforts.join(", ")}, the levels that ${harness.name} takes`);
+  }
+  // A limit holds a session only where the harness says what the session has spent
+  if (!harness.reportsCost && options["max-budget-usd"] !== undefined) {
+    throw new UsageError(`${harness.name} reports no cost, so --max-budget-usd cannot hold its sessions. Leave it out${harness.countsTokens ? ", and use --max-tokens for a limit" : ""}.`);
+  }
+  if (!harness.countsTokens && options["max-tokens"] !== undefined) {
+    throw new UsageError(
+      harness.reportsCost
+        ? `${harness.name} is held by --max-budget-usd, and --max-tokens cannot be given with --harness ${harness.id}. Leave it out.`
+        : `${harness.name} counts tokens only when a session has ended, so --max-tokens cannot hold its sessions. Leave it out.`
+    );
   }
   const repeat = wholeNumber(options, "repeat", 1);
   const concurrency = wholeNumber(options, "concurrency", 1);
   const runsDir = join(out, "runs");
+  const told = new Set();
   const shared = {
-    model: options.model ?? "claude-opus-5-5",
+    harness: harness.id,
+    model,
     effort,
-    maxBudgetUsd: positiveNumber(options, "max-budget-usd", 5),
+    maxBudgetUsd: harness.reportsCost ? positiveNumber(options, "max-budget-usd", 5) : null,
+    maxTokens: options["max-tokens"] === undefined ? null : wholeNumber(options, "max-tokens"),
     timeoutMin: timeLimit(options),
     benchmark: benchmarkVersion(),
   };
   const settings = {
     ...shared,
+    harness,
     workDir: join(out, "work"),
     runsDir,
     // A session runs in its checkout, so a path is resolved here. A bare name is looked up on PATH.
-    agentCommand: [options.agent?.includes("/") ? resolve(options.agent) : (options.agent ?? "claude")],
+    agentCommand: [options.agent?.includes("/") ? resolve(options.agent) : (options.agent ?? harness.executable)],
     timeoutMs: shared.timeoutMin * 60 * 1000,
     // A record names it, since the time of a session depends on what runs beside it. A resumed run may take another.
     concurrency,
+    // What a harness hands every session is said once for each codebase, at its first session
+    tell: (label, text) => {
+      if (told.has(label)) return;
+      told.add(label);
+      console.log(text);
+    },
   };
   mkdirSync(runsDir, { recursive: true });
   takeOutputDirectory(out);
@@ -467,18 +508,21 @@ async function run(options) {
     const unfit = unfitServer();
     if (unfit !== null) throw new Error(unfit);
     shared.languageServer = languageServerVersion();
+    // How the harness was told to hand a session the server's tools, where it needs more than the command
+    if (harness.serverSettings) shared.serverSettings = harness.serverSettings;
     const built = languageServerBuilt();
     // A record names the build too. The run is held to its version and sources alone.
     settings.languageServer = built ? `${shared.languageServer}, built ${built}` : shared.languageServer;
   }
   const writeSettings = keepSettings(out, runsDir, shared, arms);
-  console.log(`${plural(jobs.length, "session", "sessions")} to run with ${settings.model}`);
+  console.log(`${plural(jobs.length, "session", "sessions")} to run with ${settings.model} in ${harness.name}`);
   if (jobs.length === 0) return;
   // Claude Code stops a session at the first turn that ends above its limit, so a session can pass it by that turn
-  console.log(
-    `Each is stopped once it has spent $${settings.maxBudgetUsd}, which makes about $${(jobs.length * settings.maxBudgetUsd).toFixed(0)} if every one gets that far. ` +
-      `The isolation check before them is one short session more.`
-  );
+  const limits = harness.reportsCost
+    ? `Each is stopped once it has spent $${settings.maxBudgetUsd}, which makes about $${(jobs.length * settings.maxBudgetUsd).toFixed(0)} if every one gets that far.`
+    : `${harness.name} reports no cost, so only the time limit of ${plural(settings.timeoutMin, "minute", "minutes")}` +
+      (settings.maxTokens ? ` and the limit of ${settings.maxTokens} tokens hold each session.` : ` holds each session.`);
+  console.log(`${limits} The isolation check before them is one short session more.`);
 
   assertProcessesVisible();
   // The wrapper starts the binary at a session's first tool call. One that cannot start, or does not answer what
@@ -486,11 +530,11 @@ async function run(options) {
   if (needsServer) {
     const { ok, report } = await runChecks();
     if (!ok) throw new Error(`The lsp arm needs a language server that starts and answers, and the checks of "cli.mjs doctor" fail:\n${report}`);
-    await assertMcpServer();
+    await assertMcpServer({ env: harness.environment(null) });
   }
-  // Claude Code updates itself, also between two runs into one directory, so its version is held like the model
+  // A harness updates itself, also between two runs into one directory, so its version is held like the model
   settings.agentVersion = await assertIsolated(settings);
-  writeSettings(agentName(settings.agentVersion));
+  writeSettings(harness.agentName(settings.agentVersion));
 
   // A session that cannot run at all, or that lost the API, stops the
   // benchmark. No new session starts, and the ones under way finish first,
@@ -567,7 +611,7 @@ const COMMANDS = {
   plan: { run: plan, options: ["out", "config", "min-files", "levels"], interrupted: "No plan was written." },
   run: {
     run,
-    options: ["out", "config", "model", "effort", "arms", "repeat", "concurrency", "only", "levels", "max-budget-usd", "timeout-min", "agent"],
+    options: ["out", "config", "harness", "model", "effort", "arms", "repeat", "concurrency", "only", "levels", "max-budget-usd", "max-tokens", "timeout-min", "agent"],
     interrupted: "Finished sessions keep their records, and the same command picks up from there.",
   },
   report: { run: report, options: ["out"], interrupted: "" },

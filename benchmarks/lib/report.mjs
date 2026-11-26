@@ -6,7 +6,8 @@
  * symbols of the benchmarked codebases stay in the plan and the run records.
  */
 
-import { ARMS, BUILT_IN_TOOLS } from "./agent.mjs";
+import { ARMS } from "./arms.mjs";
+import { harnessIdOf, harnessOf } from "./harnesses/index.mjs";
 import { plural, TASK_TYPES } from "./tasks.mjs";
 
 function median(values) {
@@ -19,16 +20,28 @@ function median(values) {
 const totalToolCalls = (record) => Object.values(record.toolCalls).reduce((total, count) => total + count, 0);
 
 // The ways a session can end, best first. A failed session is told apart by what stopped it:
-// the two limits are the operator's and say something about the arm, an error says little.
+// the limits are the operator's and say something about the arm, an error says little. A limit
+// of money holds a harness that reports a cost, and one of tokens a harness that counts them as a
+// session goes.
 const ENDINGS = [
   { id: "passed", title: "Solved" },
   { id: "wrong-result", title: "Wrong result" },
   { id: "does-not-compile", title: "Does not compile" },
   { id: "time-limit", title: "Out of time" },
-  { id: "budget-limit", title: "Out of budget" },
+  { id: "budget-limit", title: "Out of budget", limit: "reportsCost" },
+  { id: "token-limit", title: "Out of tokens", limit: "countsTokens" },
   { id: "error", title: "Session error" },
   { id: "server-failed", title: "Server did not start" },
 ];
+
+// The endings that the sessions of a harness can come to: a limit only where the harness can be held to it
+const endingsOf = (harness) => ENDINGS.filter(({ limit }) => limit === undefined || harness[limit]);
+
+// The endings that a summary counts, as the harness of its sessions has them
+const endingsIn = (summary) => ENDINGS.filter(({ id }) => id in summary.overall[summary.arms[0].id].endings);
+
+// Tokens in place of a cost, for the sessions of a harness that reports none
+const TOKENS = ["inputTokens", "cacheReadInputTokens", "outputTokens"];
 
 const endingOf = (record) => (record.outcome === "agent-failed" ? record.failure : record.outcome);
 
@@ -36,14 +49,22 @@ const endingOf = (record) => (record.outcome === "agent-failed" ? record.failure
 const levelOf = (record) => record.level ?? null;
 
 // The figures of a group of runs. Medians cover every session of the group that has the figure, solved or not.
-function measure(records) {
+function measure(records, harness) {
+  const costReported = harness.reportsCost;
   return {
     sessions: records.length,
     solved: records.filter((record) => record.outcome === "passed").length,
-    endings: Object.fromEntries(ENDINGS.map(({ id }) => [id, records.filter((record) => endingOf(record) === id).length])),
+    endings: Object.fromEntries(endingsOf(harness).map(({ id }) => [id, records.filter((record) => endingOf(record) === id).length])),
     // A session that was killed reports no cost
     withoutCost: records.filter((record) => record.costUsd === null).length,
     costUsd: median(records.map((record) => record.costUsd)),
+    ...(costReported
+      ? {}
+      : {
+          // Nor do tokens, where its harness counts them only at the end of a turn
+          withoutTokens: records.filter((record) => (record.inputTokens ?? null) === null).length,
+          ...Object.fromEntries(TOKENS.map((figure) => [figure, median(records.map((record) => record[figure] ?? null))])),
+        }),
     wallMs: median(records.map((record) => record.wallMs)),
     turns: median(records.map((record) => record.turns)),
     toolCalls: median(records.map(totalToolCalls)),
@@ -56,14 +77,26 @@ function measure(records) {
  * @param {string[]} [arms]   The arms that were asked for. Without it, the ones that have a record.
  */
 export function summarize(plan, allRecords, arms) {
+  // Sessions of two harnesses or two models would sit in the same rounds and be compared as one arm
+  const ids = [...new Set(allRecords.map((record) => harnessIdOf(record.harness)))];
+  const unknown = ids.filter((id) => harnessOf(id) === null);
+  if (unknown.length > 0) throw new Error(`The records name a harness that this benchmark does not know: ${unknown.join(", ")}. Report them with the benchmark that ran them.`);
+  if (ids.length > 1) {
+    throw new Error(`The records are of sessions in ${ids.map((id) => harnessOf(id).name).join(" and ")}. A report shows one run: give each harness an --out of its own, and report each one.`);
+  }
+  const models = [...new Set(allRecords.map((record) => record.model))];
+  if (models.length > 1) throw new Error(`The records are of sessions with ${models.join(" and ")}. A report shows one run: give each model an --out of its own, and report each one.`);
   // An arm that was asked for and has no session yet still has every round waiting for it
   const armIds = Object.keys(ARMS).filter((arm) => (arms ? arms.includes(arm) : allRecords.some((record) => record.arm === arm)));
   // The arms are compared on the same work: a round of a task counts once every arm has done it
   const round = (record) => `${record.task} #${record.repetition}`;
   const complete = (key) => armIds.every((arm) => allRecords.some((record) => record.arm === arm && round(record) === key));
   const records = allRecords.filter((record) => complete(round(record)));
+  // A record of a run made before there was a choice of harness names none, and ran in Claude Code
+  const harness = harnessOf(ids[0]);
+  const costReported = harness.reportsCost;
   const perArm = (subset) =>
-    Object.fromEntries(armIds.map((arm) => [arm, measure(subset.filter((record) => record.arm === arm))]));
+    Object.fromEntries(armIds.map((arm) => [arm, measure(subset.filter((record) => record.arm === arm), harness)]));
   // The files that the target of each codebase involves, in the order of the plan's codebases
   const targetsOf = (subset) =>
     plan.codebases
@@ -79,8 +112,17 @@ export function summarize(plan, allRecords, arms) {
       });
 
   return {
-    model: [...new Set(allRecords.map((record) => record.model))].join(", "),
-    // Null for the sessions that ran at the effort Claude Code picks for the model
+    // A page shows one run, and so one harness. Two are two output directories.
+    harness: harness.name,
+    // The built-in tools that both arms had
+    tools: harness.tools,
+    // False where the sessions reported tokens and no cost, and the page shows those
+    costReported,
+    // Whether the harness reports these, which the page shows as missing otherwise
+    turnsReported: harness.reportsTurns === true,
+    retriesReported: harness.reportsRetries === true,
+    model: models.join(", "),
+    // Null for the sessions that ran at the effort their harness picks for the model
     efforts: [...new Set(allRecords.map((record) => record.effort ?? null))],
     // Sessions whose round of a task another arm has not done yet. They are in no figure.
     unpaired: allRecords.length - records.length,
@@ -109,6 +151,7 @@ export function summarize(plan, allRecords, arms) {
       ending: endingOf(record),
       wallMs: record.wallMs,
       costUsd: record.costUsd,
+      ...(costReported ? {} : Object.fromEntries(TOKENS.map((figure) => [figure, record[figure] ?? null]))),
       turns: record.turns,
       toolCalls: totalToolCalls(record),
       lspCalls: record.lspCalls,
@@ -137,7 +180,12 @@ const FORMAT = {
     return seconds < 60 ? `${seconds} s` : `${Math.floor(seconds / 60)} min ${seconds % 60} s`;
   },
   count: (value) => (value === null ? MISSING : String(Math.round(value))),
+  tokens: (value) => (value === null || value === undefined ? MISSING : Math.round(value).toLocaleString("en-US")),
 };
+
+// What a session spent, as its harness reports it: a cost, or tokens where it reports none
+const spent = (group, costReported) =>
+  costReported ? FORMAT.cost(group.costUsd) : `${FORMAT.tokens(group.inputTokens)} in, ${FORMAT.tokens(group.cacheReadInputTokens)} cached, ${FORMAT.tokens(group.outputTokens)} out`;
 
 // Row labels of the charts, which have less room than the table
 const SHORT_TITLE = {
@@ -290,10 +338,19 @@ const PANELS = [
   },
   {
     title: "Median cost",
+    cost: true,
     value: (group) => group.costUsd,
     label: (group) => FORMAT.cost(group.costUsd),
     // Cents are too coarse for an axis that ends below ten of them
     tick: (amount, end) => `$${amount.toFixed(end <= 0.1 ? 3 : 2)}`,
+  },
+  {
+    // In place of the cost, for a harness that reports none. The input dominates what a session spends.
+    title: "Median input tokens",
+    tokens: true,
+    value: (group) => group.inputTokens ?? null,
+    label: (group) => FORMAT.tokens(group.inputTokens),
+    tick: (amount) => FORMAT.tokens(amount),
   },
   {
     title: "Median time",
@@ -310,6 +367,9 @@ const PANELS = [
   },
 ];
 
+// The panels of a run: the cost where its harness reports one, and the tokens where it does not
+const panelsOf = (costReported) => PANELS.filter((panel) => (panel.cost ? costReported : panel.tokens ? !costReported : true));
+
 // Layout of the task chart, in SVG user units, which are CSS pixels at full width
 const CHART = { width: 1080, labels: 210, panelGap: 28, valueRoom: 76, header: 30, barHeight: 14, barGap: 2, groupGap: 16, footer: 22 };
 
@@ -320,7 +380,8 @@ const CHART = { width: 1080, labels: 210, panelGap: 28, valueRoom: 76, header: 3
 function taskChart(summary) {
   const { arms, taskTypes } = summary;
   const { width, labels, panelGap, valueRoom, header, barHeight, barGap, groupGap, footer } = CHART;
-  const panelWidth = (width - labels - panelGap * (PANELS.length - 1)) / PANELS.length;
+  const shown = panelsOf(summary.costReported);
+  const panelWidth = (width - labels - panelGap * (shown.length - 1)) / shown.length;
   const plot = panelWidth - valueRoom;
   const groupHeight = arms.length * (barHeight + barGap) - barGap + groupGap;
   const bottom = header + taskTypes.length * groupHeight - groupGap;
@@ -333,7 +394,7 @@ function taskChart(summary) {
     })
     .join("");
 
-  const panels = PANELS.map((unfitted, panelIndex) => {
+  const panels = shown.map((unfitted, panelIndex) => {
     const left = labels + panelIndex * (panelWidth + panelGap);
     const groups = taskTypes.flatMap((type) => arms.map((arm) => type[arm.id]));
     const panel = unfitted.fitted?.(groups) ?? unfitted;
@@ -378,12 +439,21 @@ function taskChart(summary) {
   const costless = arms
     .filter((arm) => summary.overall[arm.id].withoutCost > 0)
     .map((arm) => `${count(summary.overall[arm.id].withoutCost, "session")} ${arm.title.toLowerCase()}`);
+  // And one that the harness counts only at the end of a turn has no tokens either, when it did not get there
+  const tokenless = arms
+    .filter((arm) => summary.overall[arm.id].withoutTokens > 0)
+    .map((arm) => `${count(summary.overall[arm.id].withoutTokens, "session")} ${arm.title.toLowerCase()}`);
   const caption =
     "Each kind of task across all codebases. Medians include the sessions that did not solve their task." +
-    (costless.length > 0 ? ` Ended without reporting a cost, and left out of the cost medians: ${costless.join(", ")}.` : "");
+    (!summary.costReported
+      ? ` ${summary.harness} reports no cost, so the page shows tokens in its place.` +
+        (tokenless.length > 0 ? ` Ended before ${summary.harness} counted their tokens, and left out of the token medians: ${tokenless.join(", ")}.` : "")
+      : costless.length > 0
+        ? ` Ended without reporting a cost, and left out of the cost medians: ${costless.join(", ")}.`
+        : "");
   return (
     `<figure class="card chart"><h2>By kind of task</h2><figcaption>${caption}</figcaption>` +
-    `<svg viewBox="0 0 ${width} ${bottom + footer + 6}" role="img" aria-label="Tasks solved, median cost and median time per kind of task and arm. The table below has every session.">` +
+    `<svg viewBox="0 0 ${width} ${bottom + footer + 6}" role="img" aria-label="Tasks solved, ${shown[1].title.toLowerCase()} and median time per kind of task and arm. The table below has every session.">` +
     `${rowLabels}${panels}</svg></figure>`
   );
 }
@@ -446,8 +516,18 @@ function levelChart(type, arms, unfitted) {
   );
 }
 
+// The cells of what sessions spent: one of cost, or three of tokens where the harness reports no cost
+const spentCells = (group, costReported) =>
+  costReported
+    ? `<td class="number">${FORMAT.cost(group.costUsd)}</td>`
+    : TOKENS.map((figure) => `<td class="number">${FORMAT.tokens(group[figure])}</td>`).join("");
+const spentHeads = (costReported, prefix = "") =>
+  (costReported ? ["Cost"] : ["Input tokens", "Cached input", "Output tokens"])
+    .map((title) => `<th class="number">${prefix}${prefix === "" ? title : title.toLowerCase()}</th>`)
+    .join("");
+
 // The figures of a task type per level and arm, with the files that the target of each codebase involves
-function levelTable(type, arms) {
+function levelTable(type, arms, costReported) {
   const rows = type.levels
     .map((level) =>
       arms
@@ -457,7 +537,7 @@ function levelTable(type, arms) {
           const shared = position === 0 ? `<td rowspan="${arms.length}">${escapeHtml(levelName(level.level))}</td><td rowspan="${arms.length}">${escapeHtml(files)}</td>` : "";
           return (
             `<tr${position === 0 ? ' class="level"' : ""}>${shared}<td><span class="key ${arm.id}"></span>${escapeHtml(arm.title)}</td><td class="number">${FORMAT.solved(group)}</td>` +
-            `<td class="number">${FORMAT.cost(group.costUsd)}</td><td class="number">${FORMAT.time(group.wallMs)}</td><td class="number">${FORMAT.count(group.toolCalls)}</td></tr>`
+            `${spentCells(group, costReported)}<td class="number">${FORMAT.time(group.wallMs)}</td><td class="number">${FORMAT.count(group.toolCalls)}</td></tr>`
           );
         })
         .join("")
@@ -465,7 +545,7 @@ function levelTable(type, arms) {
     .join("");
   return (
     `<div class="table-card"><table><thead><tr><th>Level</th><th>Files of each target</th><th>Arm</th><th class="number">Solved</th>` +
-    `<th class="number">Median cost</th><th class="number">Median time</th><th class="number">Median tool calls</th></tr></thead><tbody>${rows}</tbody></table></div>`
+    `${spentHeads(costReported, "Median ")}<th class="number">Median time</th><th class="number">Median tool calls</th></tr></thead><tbody>${rows}</tbody></table></div>`
   );
 }
 
@@ -474,20 +554,29 @@ function levelTable(type, arms) {
  * chart of cost and one of time against level, and the figures in a table.
  */
 function levelSection(summary) {
-  const [, cost, time] = PANELS;
+  const [, spentPanel, time] = panelsOf(summary.costReported);
   const cards = summary.taskTypes
     .map(
       (type) =>
         `<section class="card"><h2>${escapeHtml(type.title)}</h2>` +
         `<p class="lede">A level is the number of files that the plan asked a target to involve. The table has the number that the target of each codebase involves.</p>` +
-        `<div class="pair">${levelChart(type, summary.arms, cost)}${levelChart(type, summary.arms, time)}</div>${levelTable(type, summary.arms)}</section>`
+        `<div class="pair">${levelChart(type, summary.arms, spentPanel)}${levelChart(type, summary.arms, time)}</div>${levelTable(type, summary.arms, summary.costReported)}</section>`
     )
     .join("");
   return `<div class="levels">${cards}</div>`;
 }
 
+// The limits that a session of the run could reach, as the footnote names them
+function limitsNote(summary) {
+  const limits = endingsIn(summary)
+    .filter(({ id }) => id.endsWith("-limit"))
+    .map(({ title }) => `"${title}"`);
+  return limits.length === 1 ? `${limits[0]} is the limit the benchmark was run with.` : `${limits.join(" and ")} are the limits the benchmark was run with.`;
+}
+
 // One row per arm, one column per way a session can end
 function endingsTable(summary) {
+  const ENDINGS = endingsIn(summary);
   const head = ENDINGS.map(({ title }) => `<th class="number">${escapeHtml(title)}</th>`).join("");
   const rows = summary.arms
     .map((arm) => {
@@ -507,16 +596,16 @@ function runsTable(summary) {
         `<tr><td>${escapeHtml(run.codebase)}</td><td>${escapeHtml(typeTitle[run.type])}</td>` +
         `<td><span class="key ${run.arm}"></span>${escapeHtml(armTitle[run.arm])}</td><td>${escapeHtml(ENDING_TITLE[run.ending])}</td>` +
         `<td class="number">${escapeHtml(levelName(run.level))}</td><td class="number">${FORMAT.count(run.files)}</td>` +
-        `<td class="number">${FORMAT.time(run.wallMs)}</td><td class="number">${FORMAT.cost(run.costUsd)}</td>` +
+        `<td class="number">${FORMAT.time(run.wallMs)}</td>${spentCells(run, summary.costReported)}` +
         `<td class="number">${FORMAT.count(run.turns)}</td><td class="number">${run.toolCalls}</td>` +
         `<td class="number">${run.lspCalls}</td><td class="number">${FORMAT.count(run.changedFiles)}</td>` +
-        `<td class="number">${run.apiRetries}</td></tr>`
+        `<td class="number">${FORMAT.count(run.apiRetries)}</td></tr>`
     )
     .join("");
   return (
     `<div class="card table-card"><h2>Every session</h2><table><thead><tr><th>Codebase</th><th>Task</th><th>Arm</th><th>Outcome</th>` +
     `<th class="number">Level</th><th class="number">Target files</th>` +
-    `<th class="number">Time</th><th class="number">Cost</th><th class="number">Turns</th><th class="number">Tool calls</th>` +
+    `<th class="number">Time</th>${spentHeads(summary.costReported)}<th class="number">Turns</th><th class="number">Tool calls</th>` +
     `<th class="number">Server calls</th><th class="number">Files</th><th class="number">API retries</th></tr></thead><tbody>${rows}</tbody></table></div>`
   );
 }
@@ -525,8 +614,8 @@ function runsTable(summary) {
 export function renderReport(summary) {
   const { arms, overall, codebases, runs } = summary;
   const sizes = codebases.map((codebase) => `${codebase.label} (${codebase.modules} modules, ${codebase.lines.toLocaleString("en-US")} lines)`);
-  const effort = ` at ${summary.efforts.map((level) => (level === null ? "Claude Code's default effort" : `effort ${level}`)).join(" and ")}`;
-  const agent = summary.agentVersions.length > 0 ? ` in Claude Code ${summary.agentVersions.join(" and ")}` : "";
+  const effort = ` at ${summary.efforts.map((level) => (level === null ? `${summary.harness}'s default effort` : `effort ${level}`)).join(" and ")}`;
+  const agent = ` in ${summary.harness}${summary.agentVersions.length > 0 ? ` ${summary.agentVersions.join(" and ")}` : ""}`;
   const server = summary.languageServers.length > 0 ? ` The language server is elm-lsp-rust ${summary.languageServers.join(" and ")}.` : "";
   const lede =
     `${summary.model}${effort}${agent} worked on ${count(summary.taskTypes.length, "kind")} of refactoring in ` +
@@ -539,7 +628,7 @@ export function renderReport(summary) {
 
   const tiles = [
     tile("Tasks solved", arms, overall, FORMAT.solved),
-    tile("Median cost per session", arms, overall, (group) => FORMAT.cost(group.costUsd)),
+    tile(summary.costReported ? "Median cost per session" : "Median tokens per session", arms, overall, (group) => spent(group, summary.costReported)),
     tile("Median time per session", arms, overall, (group) => FORMAT.time(group.wallMs)),
     tile("Median tool calls per session", arms, overall, (group) => FORMAT.count(group.toolCalls)),
   ].join("");
@@ -562,7 +651,7 @@ ${taskChart(summary)}
 ${levelSection(summary)}
 ${endingsTable(summary)}
 ${runsTable(summary)}
-<p class="note">Both arms get the same prompt, the same model and the same built-in tools (${BUILT_IN_TOOLS.join(", ")}). The only difference is whether the session has the language server, with its tools and the notes on paths, lines and columns that it sends when a session connects. Each session starts from a fresh checkout with a warm compiler cache. "Out of time" and "Out of budget" are the limits the benchmark was run with. "Session error" is a session that ended on an error of its own, such as a request that grew too long for the model. "Level" is the number of files that the plan asked a target to involve, and "Target files" the number that the session's target involves. "Turns" is the number of turns that Claude Code reports for the session, "Server calls" counts the calls to the language server, and "Files" the files the session changed. A module that moved counts twice there, for the file that went and the one that came. "API retries" counts how often Claude Code had to ask the API again, which tells a session that waited from one that worked slowly.</p>
+<p class="note">Both arms get the same prompt, the same model and the same built-in tools of ${escapeHtml(summary.harness)} (${escapeHtml(summary.tools.join(", "))}). The only difference is whether the session has the language server, with its tools and the notes on paths, lines and columns that it sends when a session connects. Each session starts from a fresh checkout with a warm compiler cache. ${limitsNote(summary)} "Session error" is a session that ended on an error of its own, such as a request that grew too long for the model. "Level" is the number of files that the plan asked a target to involve, and "Target files" the number that the session's target involves. ${summary.turnsReported ? `"Turns" is the number of turns that ${escapeHtml(summary.harness)} reports for the session` : `"Turns" is empty, since ${escapeHtml(summary.harness)} reports no turns of the agent`}, "Server calls" counts the calls to the language server, and "Files" the files the session changed. A module that moved counts twice there, for the file that went and the one that came. ${summary.retriesReported ? `"API retries" counts how often ${escapeHtml(summary.harness)} had to ask the API again, which tells a session that waited from one that worked slowly.` : `"API retries" is empty where ${escapeHtml(summary.harness)} does not say when it asks the API again.`}</p>
 </main>
 <div id="tip" role="tooltip"></div>
 <script>${SCRIPT}</script>

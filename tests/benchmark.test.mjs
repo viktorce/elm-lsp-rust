@@ -32,7 +32,8 @@ import {
 import { tmpdir } from "os";
 import { basename, dirname, join, relative } from "path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { ARMS, assertMcpServer, BENCHMARK_SOURCES, BUILT_IN_TOOLS, runAgent, stateOfSources } from "../benchmarks/lib/agent.mjs";
+import { ARMS, assertMcpServer, BENCHMARK_SOURCES, runAgent, stateOfSources } from "../benchmarks/lib/agent.mjs";
+import { BUILT_IN_TOOLS } from "../benchmarks/lib/harnesses/claude-code.mjs";
 import { loadConfig } from "../benchmarks/lib/config.mjs";
 import { assertIsolated } from "../benchmarks/lib/isolation.mjs";
 import {
@@ -53,10 +54,9 @@ import { unmetExpectations } from "../benchmarks/lib/tasks.mjs";
 import { probeCodebase } from "../benchmarks/lib/probe.mjs";
 import { ToolError } from "../mcp-wrapper/errors.mjs";
 import { copyFixture, installLanguageServerStandIn, REPO, runNode, tempDir, wrapperCopy } from "./support.mjs";
-import { BENCH, left, SPREAD } from "./benchmark-support.mjs";
+import { BENCH, FAKE_COMPILER, git, gitRepository, left, SPREAD } from "./benchmark-support.mjs";
 
 const FAKE_AGENT = join(REPO, "tests/fakes/claude.mjs");
-const FAKE_COMPILER = join(REPO, "tests/fakes/elm-make.mjs");
 
 // The same type and case expression in code and in a string that begins above the changed hunk.
 const LAST_SHAPE_BRANCH = `        Triangle ->
@@ -527,10 +527,6 @@ for (const place of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_D
   delete process.env[place];
 }
 
-// git in a test repository, with an identity and without signing, whatever this machine's configuration says
-const git = (repo, ...args) =>
-  execFileSync("git", ["-C", repo, "-c", "user.name=test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", ...args]).toString();
-
 const worktreesOf = (repo) => git(repo, "worktree", "list").trim().split("\n").length;
 
 // True when two paths lead to one directory: a file written under the one is there under the other
@@ -542,14 +538,6 @@ function sameDirectory(a, b) {
   } finally {
     rmSync(join(a, probe), { force: true });
   }
-}
-
-// Turn a directory into a git repository with one commit.
-function gitRepository(dir) {
-  git(dir, "init", "--quiet");
-  git(dir, "add", ".");
-  git(dir, "commit", "--quiet", "--message", "fixture");
-  return dir;
 }
 
 test("a worktree reports what the agent changed, and nothing the harness put there", async (t) => {
@@ -1645,7 +1633,7 @@ test("plan, run and report work end to end on a throwaway repository", async (t)
   const run = (only, mode, ...more) => bench(runArguments(only, ...more), mode);
   const solved = await run("rename-function", "solve");
   assert.equal(solved.code, 0, solved.stderr);
-  assert.match(solved.stdout, /2 sessions to run with claude-opus-5-5\nEach is stopped once it has spent \$5, which makes about \$10 if every one gets that far\./);
+  assert.match(solved.stdout, /2 sessions to run with claude-opus-5-5 in Claude Code\nEach is stopped once it has spent \$5, which makes about \$10 if every one gets that far\./);
   assert.match(solved.stdout, /Fixture\/rename-function\/100  baseline  #1  passed  \d+s  \$0\.25/);
   assert.match(solved.stdout, /Fixture\/rename-function\/100  lsp  #1  passed/);
 
@@ -3147,7 +3135,7 @@ test("a run is held to the effort it was started with, and the report names it",
   assert.equal((await run("--repeat", "2", "--effort", "high")).code, 0);
   assert.equal(records().length, 2);
   assert.equal((await runNode(BENCH, ["report", "--out", out])).code, 0);
-  assert.match(readFileSync(join(out, "report.html"), "utf-8"), /claude-opus-5-5 at effort high worked on/);
+  assert.match(readFileSync(join(out, "report.html"), "utf-8"), /claude-opus-5-5 at effort high in Claude Code worked on/);
 
   // A run that named none is held to none: its sessions ran at the default of Claude Code for the model
   const fresh = await plannedFixture(t);
@@ -3166,7 +3154,7 @@ test("a run is held to the effort it was started with, and the report names it",
   assert.equal(named.code, 1);
   assert.match(named.stderr, /--effort was Claude Code's default and is now high\./);
   assert.equal((await runNode(BENCH, ["report", "--out", fresh.out])).code, 0);
-  assert.match(readFileSync(join(fresh.out, "report.html"), "utf-8"), /claude-opus-5-5 at Claude Code&#39;s default effort worked on/);
+  assert.match(readFileSync(join(fresh.out, "report.html"), "utf-8"), /claude-opus-5-5 at Claude Code&#39;s default effort in Claude Code worked on/);
 });
 
 test("run --only with a text that matches no task of the plan names the plan's tasks", async (t) => {
@@ -3181,7 +3169,7 @@ test("run --only with a text that matches no task of the plan names the plan's t
   assert.equal((await run("rename-function")).code, 0);
   const again = await run("rename-function");
   assert.equal(again.code, 0, again.stderr);
-  assert.match(again.stdout, /^0 sessions to run with claude-opus-5-5$/m);
+  assert.match(again.stdout, /^0 sessions to run with claude-opus-5-5 in Claude Code$/m);
 });
 
 test("a session that wrecks its project or comes up wrongly equipped is accounted for", async (t) => {

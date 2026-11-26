@@ -9,7 +9,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "fs";
 import { dirname, join, relative } from "path";
-import { BENCHMARK_SOURCES, summarizeTranscript } from "../benchmarks/lib/agent.mjs";
+import { BENCHMARK_SOURCES } from "../benchmarks/lib/agent.mjs";
+import { summarizeTranscript } from "../benchmarks/lib/harnesses/claude-code.mjs";
 import { REPO } from "./support.mjs";
 import { BENCH } from "./benchmark-support.mjs";
 
@@ -67,6 +68,16 @@ test("a transcript is condensed into the session's figures", () => {
     toolCalls: { Bash: 2, "mcp__elm-lsp__elm_references": 1, "mcp__elm-lsp__elm_rename_function": 1 },
     lspCalls: 2,
   });
+
+  // A count that Claude Code gives as null is none, as before there was a choice of harness
+  const uncached = summarizeTranscript([
+    { type: "system", subtype: "init" },
+    { type: "result", subtype: "success", usage: { input_tokens: 7, cache_creation_input_tokens: null, cache_read_input_tokens: null, output_tokens: 3 } },
+  ]);
+  assert.deepEqual(
+    [uncached.inputTokens, uncached.cacheCreationInputTokens, uncached.cacheReadInputTokens, uncached.outputTokens],
+    [7, 0, 0, 3]
+  );
 
   // A session that was killed has no result event
   const killed = summarizeTranscript([{ type: "system", subtype: "init", mcp_servers: [] }, toolUse("Bash")]);

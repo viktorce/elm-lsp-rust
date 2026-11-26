@@ -1,41 +1,21 @@
 /**
- * Running the agent: one headless Claude Code session per task, with or
- * without the Elm language server, and nothing else from the machine's setup.
+ * Running the agent: one headless session per task, in the harness that the
+ * run names, with or without the Elm language server, and nothing else from
+ * the machine's setup. What the server and the benchmark are made of, too.
  */
 
 import { execFileSync } from "child_process";
 import { createHash } from "crypto";
-import { createWriteStream, lstatSync, readFileSync, readlinkSync, statSync } from "fs";
-import { basename, dirname, join, relative, resolve } from "path";
-import { fileURLToPath } from "url";
-import { findHarness, installAt, SERVER_NAME } from "../../mcp-wrapper/harnesses.mjs";
+import { createWriteStream, lstatSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync } from "fs";
+import { tmpdir } from "os";
+import { basename, join, relative, resolve } from "path";
 import { RUST_LSP_PATH } from "../../mcp-wrapper/lsp-client.mjs";
+import { ARMS, REPO_ROOT } from "./arms.mjs";
 import { OWN_SETTINGS, ownEnvironment } from "./git.mjs";
+import { claudeCode } from "./harnesses/claude-code.mjs";
 import { Interrupted, runGroup } from "./process.mjs";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-
-// The same built-in tools for both arms, named when a session starts: what it reads, searches and edits files with
-export const BUILT_IN_TOOLS = ["Bash", "Read", "Edit", "Write", "Grep", "Glob"];
-
-// A run works in a worktree, which shares its repository with the original
-// checkout: branches, tags, the stash, the configuration and the remotes are
-// the operator's. Denying these subcommands catches the plain way of writing
-// to them. It is a guard against accidents, not a sandbox: the agent still
-// has a shell.
-const FORBIDDEN = [
-  ...["commit", "merge", "rebase", "cherry-pick", "revert", "am", "reset", "checkout", "switch"],
-  ...["branch", "tag", "stash", "notes", "update-ref", "replace", "config", "remote", "worktree"],
-  ...["push", "fetch", "pull", "gc", "prune"],
-].map((subcommand) => `Bash(git ${subcommand} *)`);
-
-// The language server as a Claude Code user registers it, plus --project-tools:
-// the codebases are the operator's own, and the server must use the compiler
-// each of them pins, the same one the check command runs.
-function languageServer() {
-  const { command, args } = findHarness("claude-code").config(installAt(REPO_ROOT)).mcpServers[SERVER_NAME];
-  return { [SERVER_NAME]: { command, args: [...args, "--project-tools"] } };
-}
+export { ARMS };
 
 // What the binary of the language server is built from, as git pathspecs. The programs under
 // src/bin are binaries of their own, and an edit to one of them leaves the server as it was.
@@ -173,95 +153,10 @@ export function serverBuild() {
 export const benchmarkVersion = () => stateOfSources(REPO_ROOT, BENCHMARK_SOURCES) ?? "no git checkout";
 
 /**
- * The two conditions that are compared. They differ in one thing only, whether
- * the session has the language server. The server hands it its MCP tools and
- * a few notes on how to call them.
+ * Start the lsp arm's MCP command, as a session does, before any session is paid for.
+ * `env` is the environment that the harness of the run gives its sessions.
  */
-export const ARMS = {
-  baseline: { title: "Without language server", mcpServers: {} },
-  lsp: { title: "With language server", mcpServers: languageServer() },
-};
-
-// The levels of effort that Claude Code 2.1.311 takes for --effort
-export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
-
-function claudeArguments({ prompt, model, effort, arm, tools, maxBudgetUsd }) {
-  const { mcpServers } = ARMS[arm];
-  const allowed = [...tools, ...Object.keys(mcpServers).map((server) => `mcp__${server}`)];
-  return [
-    "--print",
-    prompt,
-    "--model",
-    model,
-    ...(effort ? ["--effort", effort] : []),
-    "--output-format",
-    "stream-json",
-    "--verbose",
-    "--no-session-persistence",
-    // No user or project settings: no plugins, hooks, skills or instruction files of the person running this
-    "--setting-sources",
-    "",
-    "--strict-mcp-config",
-    "--mcp-config",
-    JSON.stringify({ mcpServers }),
-    "--tools",
-    tools.join(","),
-    ...(allowed.length > 0 ? ["--allowedTools", ...allowed] : []),
-    "--disallowedTools",
-    ...FORBIDDEN,
-    "--max-budget-usd",
-    String(maxBudgetUsd),
-  ];
-}
-
-// What a Claude Code session sets for the commands it runs, as Claude Code 2.1.311 does. A benchmark
-// that an agent started would hand them on to every session, which would then run as the child of
-// another session, and not as one started from a plain shell. How Claude Code signs in and which
-// provider it uses are told by other variables, which stay.
-const PARENT_SESSION = [
-  "CLAUDECODE",
-  "CLAUDE_AGENT_SDK_VERSION",
-  "CLAUDE_CODE_CHILD_SESSION",
-  "CLAUDE_CODE_ENTRYPOINT",
-  "CLAUDE_CODE_EXECPATH",
-  "CLAUDE_CODE_MESSAGING_SOCKET",
-  "CLAUDE_CODE_MESSAGING_TOKEN",
-  "CLAUDE_CODE_SESSION_ATTENDED",
-  "CLAUDE_CODE_SESSION_ID",
-  "CLAUDE_EFFORT",
-  "CLAUDE_PID",
-];
-
-// How hard the model thinks and how long its answers may grow. A run is held to the effort it names,
-// or to the default of Claude Code for its model where it names none, and not to what the shell that
-// started it happens to set. These are the ones I found by name in Claude Code 2.1.311, so a switch
-// of the kind that a later version adds reaches a session until someone adds it here.
-const EFFORT = [
-  "CLAUDE_CODE_EFFORT_LEVEL",
-  "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT",
-  "CLAUDE_CODE_MAX_EFFORT_REMINDER",
-  "MAX_THINKING_TOKENS",
-  "CLAUDE_CODE_DISABLE_THINKING",
-  "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING",
-  "DISABLE_INTERLEAVED_THINKING",
-  "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
-];
-
-// All worktrees of a repository share one auto memory directory, the operator's
-// own. With it on, a session could read what an earlier one noted, and leave
-// notes behind in the operator's memory. No command-line flag turns it off.
-// And a run is held to the version of Claude Code that its first session
-// reported, which an update in the background of a session would change. The
-// operator's settings cannot turn that off here, since a session reads none.
-function sessionEnvironment(effort) {
-  const environment = { ...process.env, CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1", DISABLE_AUTOUPDATER: "1" };
-  for (const name of [...PARENT_SESSION, ...EFFORT]) delete environment[name];
-  // The variable takes precedence over --effort in a session, so it says the same
-  return effort ? { ...environment, CLAUDE_CODE_EFFORT_LEVEL: effort } : environment;
-}
-
-/** Start the lsp arm's MCP command, as a session does, before any session is paid for. */
-export async function assertMcpServer({ cwd = REPO_ROOT, timeoutMs = 10000, mcpServers = ARMS.lsp.mcpServers } = {}) {
+export async function assertMcpServer({ cwd = REPO_ROOT, timeoutMs = 10000, mcpServers = ARMS.lsp.mcpServers, env = claudeCode.environment() } = {}) {
   for (const [name, { command, args }] of Object.entries(mcpServers)) {
     let send;
     // The id of the request whose answer is awaited: 1 for initialize, 2 for tools/list, null once a tool is listed
@@ -272,7 +167,7 @@ export async function assertMcpServer({ cwd = REPO_ROOT, timeoutMs = 10000, mcpS
     try {
       result = await runGroup([command, ...args], {
         cwd,
-        env: sessionEnvironment(),
+        env,
         timeoutMs,
         graceMs: 200,
         onStart(input) {
@@ -315,125 +210,85 @@ export async function assertMcpServer({ cwd = REPO_ROOT, timeoutMs = 10000, mcpS
   }
 }
 
-// What a run calls the agent of its sessions. Claude Code names its version in the first event of a
-// session, and a stand-in may name none.
-export const agentName = (version) => (version ? `Claude Code ${version}` : "an agent that names no version");
-
-// Claude Code reports a failed API request as a message of its own, in the model's place
-const isOwnWords = (event) => event.is_api_error_message === true || event.message?.model === "<synthetic>";
-
-// And it says so each time it asks the API again for an answer that did not come
-const isRetry = (event) => event.type === "system" && event.subtype === "api_retry";
-
 /**
- * What one session did, read from Claude Code's stream-json events.
- * `finished` is false when the session ended without a result event or with
- * an error. `replies` counts the model's messages: a session without one
- * never got to work, as when the API turns the first request down.
- * `lspStatus`, `lspTools`, `memoryOff`, `strayTools`, `strayServers`,
- * `strayPlugins` and `agentVersion` are null when the session never got as
- * far as its first event, which describes its setup.
- * @param {object[]} events
- * @param {string[]} [given]  The built-in tools the session was started with
- * @param {string} [arm]  The arm it ran in. Only the lsp arm is given the language server's tools.
+ * A way to run a harness's executable for what a session needs before it starts, as the catalog
+ * of its models. It runs as the session's own commands do, a process group that the benchmark
+ * watches, ends when the benchmark is interrupted and kills when `deadline` has passed.
+ * @returns {import("./harness.mjs").Exec}
  */
-export function summarizeTranscript(events, given = BUILT_IN_TOOLS, arm) {
-  const init = events.find((event) => event.type === "system" && event.subtype === "init");
-  const result = events.find((event) => event.type === "result");
-  const toolCalls = {};
-  let replies = 0;
-  for (const event of events) {
-    if (event.type !== "assistant" || isOwnWords(event)) continue;
-    replies++;
-    for (const block of event.message?.content ?? []) {
-      if (block.type === "tool_use") {
-        toolCalls[block.name] = (toolCalls[block.name] ?? 0) + 1;
-      }
-    }
-  }
-
-  // Claude Code 2.1.311 ends a session over its budget with is_error and the subtype "error_max_budget_usd".
-  // Its other subtypes that begin with "error_" are not known to come with is_error, so those count on their own.
-  const failed = result?.is_error === true || /^error_/.test(result?.subtype ?? "");
-  const usage = result?.usage ?? {};
-  const lspPrefix = `mcp__${SERVER_NAME}__`;
-  const lspCalls = Object.entries(toolCalls)
-    .filter(([name]) => name.startsWith(lspPrefix))
-    .reduce((total, [, count]) => total + count, 0);
-  return {
-    finished: result !== undefined && !failed,
-    stopReason: result?.subtype ?? "no result",
-    // True when the session ended on a request that the API did not answer, or turned down
-    endedOnApiError: result?.terminal_reason === "api_error" || (result?.api_error_status ?? null) !== null,
-    // The HTTP status of the API error that ended the session, if one did and had one
-    apiErrorStatus: result?.api_error_status ?? null,
-    // How often Claude Code had to ask the API again, which tells a session that waited from one that worked slowly
-    apiRetries: events.filter(isRetry).length,
-    // True when the session's last request was never answered: Claude Code asked again, and no word of the model followed
-    waitingForApi: events.findLastIndex(isRetry) > events.findLastIndex((event) => event.type === "assistant" && !isOwnWords(event)),
-    // What Claude Code said about a session that ended on an error, as far as it said anything
-    failureText: failed && typeof result.result === "string" && result.result !== "" ? result.result : null,
-    replies,
-    agentVersion: init?.claude_code_version ?? null,
-    // The first event names the memory directories the session loads from. The
-    // field is not part of Claude Code's documented output: without it, the
-    // session counts as having none.
-    memoryOff: init ? Object.keys(init.memory_paths ?? {}).length === 0 : null,
-    // "connected", "failed", "pending" while it was still starting, or "absent"
-    lspStatus: init ? ((init.mcp_servers ?? []).find((server) => server.name === SERVER_NAME)?.status ?? "absent") : null,
-    // How many of the language server's tools the session was handed. A server can be connected and hand over none.
-    lspTools: init ? (init.tools ?? []).filter((tool) => tool.startsWith(lspPrefix)).length : null,
-    // Tools that the session was not given: neither built in for it, nor the language server's in the arm that has it
-    strayTools: init ? (init.tools ?? []).filter((tool) => !given.includes(tool) && !(arm === "lsp" && tool.startsWith(lspPrefix))) : null,
-    // MCP servers other than the language server in the arm that has it, whatever their status. One that is
-    // still starting lists no tools yet, and can hand some over later.
-    strayServers: init ? (init.mcp_servers ?? []).map((server) => server.name).filter((name) => !(arm === "lsp" && name === SERVER_NAME)) : null,
-    // Plugins beyond the ones that Claude Code has built in, which the first event lists with "builtin" for their path
-    strayPlugins: init ? (init.plugins ?? []).filter((plugin) => plugin.path !== "builtin").map((plugin) => plugin.name ?? "without a name") : null,
-    costUsd: result?.total_cost_usd ?? null,
-    apiMs: result?.duration_api_ms ?? null,
-    turns: result?.num_turns ?? null,
-    inputTokens:
-      (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0),
-    // Also on their own. The arms have different tools and so a cached prompt each, and whether a session
-    // finds its arm's still there depends on how long the other arm's sessions took since one of its own ran
-    cacheCreationInputTokens: usage.cache_creation_input_tokens ?? 0,
-    cacheReadInputTokens: usage.cache_read_input_tokens ?? 0,
-    outputTokens: usage.output_tokens ?? 0,
-    toolCalls,
-    lspCalls,
+export function execOf(command, { cwd, env, deadline }) {
+  return async (args, options = {}) => {
+    const named = [...command, ...args.slice(0, 2)].join(" ");
+    const lines = [];
+    const result = await runGroup([...command, ...args], {
+      cwd: options.cwd ?? cwd,
+      env: options.env ?? env,
+      timeoutMs: Math.max(1, deadline - Date.now()),
+      // All of it: a collected output is cut to its end, and a catalog of models is longer
+      onLine: (line) => lines.push(line),
+    });
+    if (result.timedOut) throw new Error(`${named} did not finish within the session's time limit.`);
+    if (result.code !== 0) throw new Error(`${named} failed: ${result.stderr.trim().split("\n")[0] || `it exited with ${result.code}`}`);
+    return lines.join("\n");
   };
 }
 
 /**
  * Run one session in `cwd` and wait for it to end, with every process it
- * started. Rejects when the session cannot be started or was interrupted.
+ * started. Rejects when the session cannot be started or was interrupted, and
+ * when what the harness made for it could not be removed as it should.
  * @param {object} options
- * @param {string[]} options.command  The Claude Code executable, as argv. Tests pass a stand-in.
- * @param {string} [options.effort]  One of EFFORT_LEVELS, or none for the default of Claude Code for the model
+ * @param {import("./harness.mjs").Harness} [options.harness]  Claude Code unless named
+ * @param {string[]} options.command  The harness's executable, as argv. Tests pass a stand-in.
+ * @param {string} [options.effort]  One of the harness's efforts, or none for its default for the model
  * @param {string[]} [options.tools]  Built-in tools of the session. Both arms get the same ones.
+ * @param {number | null} [options.maxTokens]  Ends a session that has spent more, where the harness counts them as it goes
+ * @param {number} options.timeoutMs  Holds what the harness does before the session, and the session itself
  * @param {string} options.transcriptPath  Every event is appended here as it arrives
+ * @param {string} [options.home]  An empty directory for what the harness makes for the session, which the caller
+ *   removes. Without it, one is made among the system's temporary files and removed here.
  * @param {number} [options.graceMs]  How long a session over its time limit has to end by itself
- * @param {(session: ReturnType<typeof summarizeTranscript>) => boolean} [options.stopIf]  Asked once the
- *   session's first event is there, which describes its setup. True ends the session at that point.
- * @returns {Promise<ReturnType<typeof summarizeTranscript> & { wallMs: number, timedOut: boolean }>}
+ * @param {(session: import("./harness.mjs").Summary) => boolean} [options.stopIf]  Asked once an event that
+ *   describes the session's setup is there. True ends the session at that point.
+ * @returns {Promise<import("./harness.mjs").Summary & { wallMs: number, timedOut: boolean }>}  `wallMs` from the
+ *   start of the session itself, after what the harness did before it
  */
-export async function runAgent({ command, cwd, prompt, model, effort, arm, tools = BUILT_IN_TOOLS, maxBudgetUsd, timeoutMs, transcriptPath, graceMs, stopIf }) {
-  const started = Date.now();
-  const transcript = createWriteStream(transcriptPath);
-  // A transcript that cannot be written fails the session below, where it can be caught
-  let unwritten = null;
-  transcript.on("error", (error) => {
-    unwritten ??= error;
-  });
+export async function runAgent({ harness = claudeCode, command, cwd, prompt, model, effort, arm, tools = harness.tools, maxBudgetUsd, maxTokens, timeoutMs, transcriptPath, home, graceMs, stopIf }) {
+  const deadline = Date.now() + timeoutMs;
+  const own = home ?? realpathSync(mkdtempSync(join(tmpdir(), "elm-benchmark-home-")));
+  const exec = execOf(command, { cwd, env: harness.environment(effort), deadline });
   const events = [];
+  let session = null;
+  let transcript = null;
+  let ended = false;
   try {
-    const { timedOut } = await runGroup([...command, ...claudeArguments({ prompt, model, effort, arm, tools, maxBudgetUsd })], {
+    // A harness whose events name no version is asked for it, just before the session. One that updates
+    // itself between two sessions is another agent.
+    let version;
+    if (harness.version) {
+      try {
+        version = await harness.version(exec);
+      } catch (error) {
+        if (error instanceof Interrupted) throw error;
+        throw new Error(`${harness.name} did not say which version it is, so its session cannot be held to the run's. ${error.message}`);
+      }
+    }
+    session = await harness.start({ command, cwd, prompt, model, effort, arm, tools, maxBudgetUsd, home: own, exec });
+    transcript = createWriteStream(transcriptPath);
+    // A transcript that cannot be written fails the session below, where it can be caught
+    let unwritten = null;
+    transcript.on("error", (error) => {
+      unwritten ??= error;
+    });
+    const summary = () => ({ ...harness.read(events, { arm, tools, given: session.given?.() ?? null }), ...(version === undefined ? {} : { agentVersion: version }) });
+    let ending = null;
+    const started = Date.now();
+    const { timedOut } = await runGroup([...command, ...session.args], {
       cwd,
-      env: sessionEnvironment(effort),
-      timeoutMs,
+      env: session.env,
+      timeoutMs: Math.max(1, deadline - started),
       stderr: "inherit",
-      // As Ctrl-C does in a terminal: Claude Code ends the turn and its shell commands, and reports the cost so far
+      // As Ctrl-C does in a terminal: the harness ends the turn and its shell commands, and says what it spent
       ask: "SIGINT",
       graceMs,
       onLine(line, end) {
@@ -448,12 +303,26 @@ export async function runAgent({ command, cwd, prompt, model, effort, arm, tools
         // Nor is null, a number or a string, though each is JSON
         if (typeof event !== "object" || event === null) return;
         events.push(event);
-        if (event.type === "system" && event.subtype === "init" && stopIf?.(summarizeTranscript(events, tools, arm))) end();
+        // Each is asked to end once. A second end kills at once, and the session could not say what it spent.
+        if (ending) return;
+        if (harness.describesSetup(event) && stopIf?.(summary())) ending = "setup";
+        // Ended the way a session over its time limit is, so it can say what it spent
+        else if (maxTokens && harness.tokensSoFar(events) > maxTokens) ending = "tokens";
+        if (ending) end();
       },
     });
     if (unwritten) throw new Error(`Could not write ${transcriptPath}: ${unwritten.message}`);
-    return { ...summarizeTranscript(events, tools, arm), wallMs: Date.now() - started, timedOut };
+    ended = true;
+    // A session that the benchmark ended for its tokens lost nothing, whatever the harness said as it stopped
+    const limited = ending === "tokens" ? { finished: false, stopReason: "token-limit", endedOnApiError: false, waitingForApi: false } : {};
+    return { ...summary(), ...limited, wallMs: Date.now() - started, timedOut };
   } finally {
-    await new Promise((resolve) => (transcript.destroyed ? resolve() : transcript.end(resolve)));
+    // What the harness made for the session goes, whatever became of the session. Where that went wrong, a
+    // session that ended is no result, and one that failed already says why it failed.
+    const left = session?.finish?.() ?? null;
+    if (home === undefined) rmSync(own, { recursive: true, force: true });
+    if (transcript) await new Promise((resolve) => (transcript.destroyed ? resolve() : transcript.end(resolve)));
+    if (left && ended) throw new Error(left);
+    if (left) console.error(left);
   }
 }
